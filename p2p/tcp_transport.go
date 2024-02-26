@@ -6,6 +6,7 @@ import (
 	"sync"
 )
 
+// Embedded mutex so we don't lock the whole transport struct.
 type peerMap struct {
 	m  map[net.Addr]Peer
 	mu sync.RWMutex
