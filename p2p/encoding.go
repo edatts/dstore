@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"log"
 )
 
 var ErrFailedToDecode = errors.New("failed to decode")
@@ -30,4 +31,7 @@ func (d DefaultDecoder) Decode(r io.Reader, x any) error {
 		return ErrFailedToDecode
 	}
 
+	log.Printf("Read %v bytes.\n", n)
+
+	return nil
 }
