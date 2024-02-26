@@ -8,10 +8,12 @@ import (
 
 func TestTcpTransport(t *testing.T) {
 	listenAddr := ":3010"
+	externalAddr := "127.0.0.1:3010"
 	opts := TCPTransportOpts{
-		ListenAddress: listenAddr,
-		HandshakeFunc: DefaultHandshake,
-		Decoder:       GobDecoder{},
+		ListenAddress:   listenAddr,
+		ExternalAddress: externalAddr,
+		HandshakeFunc:   DefaultHandshake,
+		Decoder:         DefaultDecoder{},
 	}
 	transport := NewTcpTransport(opts)
 
