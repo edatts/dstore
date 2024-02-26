@@ -16,7 +16,12 @@ func main() {
 	// node1 := NewTcpNode("localhost:3010")
 	// node2 := NewTcpNode("localhost:3011")
 
-	tr := p2p.NewTcpTransport(":3010")
+	tcpOpts := p2p.TCPTransportOpts{
+		ListenAddress: ":3010",
+		HandshakeFunc: p2p.DefaultHandshake,
+		Decoder:       p2p.GobDecoder{},
+	}
+	tr := p2p.NewTcpTransport(tcpOpts)
 
 	err := tr.ListenAndAccept()
 	if err != nil {
