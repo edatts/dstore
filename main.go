@@ -18,7 +18,6 @@ func main() {
 
 	handshakeSuccessFunc := func(peer p2p.Peer) error {
 		// Add peer to server.
-		peer.Close()
 
 		return nil
 	}
