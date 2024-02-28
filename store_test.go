@@ -5,32 +5,37 @@ import (
 	"testing"
 )
 
-func TestCASPathTransformFunc(t *testing.T) {
-	key := "testKey"
-	CASPath := CASPathTransformFunc(key)
-	expectedCASPath := "24af/da34/e3f7/4e54/b61a/8e4c/be92/1650/"
+func TestPathTransformFunc(t *testing.T) {
+	r := bytes.NewReader([]byte("testKey"))
+	CASPath, fileName, err := PathTransformFunc(r)
+	if err != nil {
+		t.Error(err)
+	}
+	filePath := CASPath + fileName
+	expectedFilePath := "15291f67/d99ea7bc/578c3544/dadfbb99/1e66fa69cb36ff70fe30e798e111ff5f"
 
-	if CASPath != expectedCASPath {
-		t.Errorf("have %s, want %s", CASPath, expectedCASPath)
+	if filePath != expectedFilePath {
+		t.Errorf("have %s, want %s", filePath, expectedFilePath)
 	}
 }
 
-// func TestStore(t *testing.T) {
+func TestStore(t *testing.T) {
 
-// 	opts := StoreOpts{
-// 		PathTransformFunc: CASPathTransformFunc,
-// 	}
+	opts := StoreOpts{
+		PathTransformFunc:      PathTransformFunc,
+		FileHashToFilePathFunc: FileHashToFilePathFunc,
+	}
 
-// 	store := NewStore(opts)
+	store := NewStore(opts)
 
-// 	r := bytes.NewReader([]byte("File content."))
+	r := bytes.NewReader([]byte("File content."))
 
-// 	err := store.WriteStream("testFolder", r)
-// 	if err != nil {
-// 		t.Error(err)
-// 	}
+	err := store.WriteStream("testFolder", r)
+	if err != nil {
+		t.Error(err)
+	}
 
-// }
+}
 
 func TestWriteStream(t *testing.T) {
 

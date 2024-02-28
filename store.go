@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,27 +11,9 @@ import (
 	"os/exec"
 )
 
-func DefaultPathTransformFunc(key string) string {
-	return key + "/"
-}
-
-// Transforms the key into a path consisting of hash parts.
-// The path has a trailing "/" so the filename can be appended
-// directly onto the end of the path string.
-func CASPathTransformFunc(key string) string {
-	hashBytes := md5.Sum([]byte(key))
-	hash := hex.EncodeToString(hashBytes[:])
-	// log.Printf("Hash: %v, len(hash): %v", hash, len(hash))
-
-	blockSize := 4
-	pathLen := len(hash) / blockSize
-	path := ""
-	for i := 0; i < pathLen; i++ {
-		path = path + hash[i*blockSize:(i*blockSize)+blockSize] + "/"
-	}
-
-	return path
-}
+const (
+	blockSize int = 8
+)
 
 // Creates the file path from the data streamed through the
 // input reader, this way the path and file name are entirely
@@ -49,7 +30,6 @@ func PathTransformFunc(r io.Reader) (string, string, error) {
 	log.Printf("len(hashBytes): %v", len(hashBytes))
 	log.Printf("len(hexHash): %v", len(hexHash))
 
-	blockSize := 8
 	pathLen := len(hexHash) / blockSize
 	path := ""
 	for i := 0; i < pathLen/2; i++ {
@@ -63,9 +43,27 @@ func PathTransformFunc(r io.Reader) (string, string, error) {
 	return path, fileName, nil
 }
 
+// Validates the provided hash then trnasforms it into the
+// corresponding file path.
+func FileHashToFilePathFunc(fileHash string) (string, error) {
+
+	if len(fileHash) != 64 {
+		return "", fmt.Errorf("invalid file hash: wrong length")
+	}
+
+	pathLen := len(fileHash) / blockSize
+	path := ""
+	for i := 0; i < pathLen/2; i++ {
+		path = path + fileHash[i*blockSize:(i*blockSize)+blockSize] + "/"
+	}
+	fileName := fileHash[pathLen*blockSize/2:]
+
+	return path + fileName, nil
+}
+
 type StoreOpts struct {
-	// PathTransformFunc func(string) string
-	PathTransformFunc func(io.Reader) (string, string, error)
+	PathTransformFunc      func(io.Reader) (string, string, error)
+	FileHashToFilePathFunc func(string) (string, error)
 }
 
 type Store struct {
@@ -78,21 +76,27 @@ func NewStore(opts StoreOpts) *Store {
 	}
 }
 
-func (s *Store) ReadStream(key string) (io.Reader, error) {
-	pathKey := CASPathTransformFunc(key)
+// Readstream takes the file hash, uses it to find the corresponding
+// file path and returns the file handle to be read from.
+func (s *Store) ReadStream(fileHash string) (io.Reader, error) {
 
-	_ = pathKey
+	filePath, err := FileHashToFilePathFunc(fileHash)
+	if err != nil {
+		return nil, err
+	}
 
-	// f, err := os.Open(pathKey)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
 
-	return nil, nil
-
+	return f, nil
 }
 
+// The data stream is written to a temp file and then the
+// corresponding path is generated from the file content before
+// the temp files is moved to it's final location.
 func (s *Store) WriteStream(r io.Reader) error {
-	// We'll need to write the data stream to a temp file and then
-	// generate the appropriate path from the file content before
-	// commiting the file.
 
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -120,49 +124,15 @@ func (s *Store) WriteStream(r io.Reader) error {
 		return err
 	}
 
-	cmd, err := exec.Command("ls", "-al").Output()
+	_, err = exec.Command("ls", "-al").Output()
 	if err != nil {
 		log.Printf("Error: %v", err)
 	}
 
-	log.Printf("cmd: %s", cmd)
-
-	cmd, err = exec.Command("mv", tempFilePath, path+fileName).Output()
+	_, err = exec.Command("mv", tempFilePath, path+fileName).Output()
 	if err != nil {
 		log.Printf("Error: %v", err)
 	}
-	log.Printf("cmd: %v", cmd)
 
 	return nil
 }
-
-// func (s *Store) WriteStream(key string, r io.Reader) error {
-
-// 	path := s.PathTransformFunc(key)
-
-// 	err := os.MkdirAll(path, os.ModePerm)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// fileName will be a hash of the content of the file
-// 	md5Hash := md5.New()
-// 	io.Copy(md5Hash, r)
-// 	hashBytes := md5Hash.Sum(nil)
-// 	fileName := hex.EncodeToString(hashBytes)
-// 	filePath := path + fileName
-
-// 	f, err := os.Create(filePath)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	n, err := io.Copy(f, r)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	log.Printf("Wrote %v bytes to disk at location: %s", n, filePath)
-
-// 	return nil
-// }
