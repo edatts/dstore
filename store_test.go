@@ -19,23 +19,23 @@ func TestPathTransformFunc(t *testing.T) {
 	}
 }
 
-func TestStore(t *testing.T) {
+// func TestStore(t *testing.T) {
 
-	opts := StoreOpts{
-		PathTransformFunc:      PathTransformFunc,
-		FileHashToFilePathFunc: FileHashToFilePathFunc,
-	}
+// 	opts := StoreOpts{
+// 		PathTransformFunc:      PathTransformFunc,
+// 		FileHashToFilePathFunc: FileHashToFilePathFunc,
+// 	}
 
-	store := NewStore(opts)
+// 	store := NewStore(opts)
 
-	r := bytes.NewReader([]byte("File content."))
+// 	r := bytes.NewReader([]byte("File content."))
 
-	err := store.WriteStream("testFolder", r)
-	if err != nil {
-		t.Error(err)
-	}
+// 	err := store.WriteStream("testFolder", r)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
 
-}
+// }
 
 func TestWriteStream(t *testing.T) {
 
