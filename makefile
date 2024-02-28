@@ -4,5 +4,5 @@ build:
 run: build
 	./bin/dstore
 
-test:
+test: build
 	go test ./... -v
