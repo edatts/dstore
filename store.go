@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 const (
@@ -27,20 +27,17 @@ func PathTransformFunc(r io.Reader) (string, string, error) {
 	hashBytes := sha256Hash.Sum(nil)
 	hexHash := hex.EncodeToString(hashBytes)
 
-	log.Printf("len(hashBytes): %v", len(hashBytes))
-	log.Printf("len(hexHash): %v", len(hexHash))
-
 	pathLen := len(hexHash) / blockSize
 	path := ""
 	for i := 0; i < pathLen/2; i++ {
 		path = path + hexHash[i*blockSize:(i*blockSize)+blockSize] + "/"
 	}
-	fileName := hexHash[pathLen*blockSize/2:]
+	CASFileName := hexHash[pathLen*blockSize/2:]
 
-	log.Printf("Path: %v\n", path)
-	log.Printf("File name: %v\n", fileName)
+	// log.Printf("Path: %v\n", path)
+	// log.Printf("File name: %v\n", fileName)
 
-	return path, fileName, nil
+	return path, CASFileName, nil
 }
 
 // Validates the provided hash then trnasforms it into the
@@ -56,9 +53,9 @@ func FileHashToFilePathFunc(fileHash string) (string, error) {
 	for i := 0; i < pathLen/2; i++ {
 		path = path + fileHash[i*blockSize:(i*blockSize)+blockSize] + "/"
 	}
-	fileName := fileHash[pathLen*blockSize/2:]
+	CASFileName := fileHash[pathLen*blockSize/2:]
 
-	return path + fileName, nil
+	return path + CASFileName, nil
 }
 
 type StoreOpts struct {
@@ -76,9 +73,54 @@ func NewStore(opts StoreOpts) *Store {
 	}
 }
 
+type BufferedReader struct {
+	buf []byte
+}
+
+// Read() starts the stream reader, returns an error
+// if the file cannot be found.
+func (s *BufferedReader) Read(fileHash string) error {
+
+	return nil
+}
+
+// Next() returns true if there is more data and false
+// otherwise. The first call of Next() prepares the
+// first chunk of data.
+func (s *BufferedReader) Next() bool {
+
+	return false
+}
+
+// Data() returns the current chunk of buffered data.
+// Next() should be called before calling Data(), calling
+// Data() before Next() will return an empty byte slice.
+func (s *BufferedReader) Data() []byte {
+
+	return s.buf
+}
+
+// ReadBuffered() returns a pointer to a BufferedReader,
+// which can be used to fetch the stored file in chunks.
+// An error is returned if the requested file cannot be
+// found.
+func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
+
+	return nil, nil
+}
+
+// Read will read the file into a byte slice and return it.
+// If the requested file is too big then Read() will return
+// an error. An error will also be returned if the requested
+// file cannot be found.
+func (s *Store) Read(fileHash string) ([]byte, error) {
+
+	return nil, nil
+}
+
 // Readstream takes the file hash, uses it to find the corresponding
 // file path and returns the file handle to be read from.
-func (s *Store) ReadStream(fileHash string) (io.Reader, error) {
+func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
 
 	filePath, err := FileHashToFilePathFunc(fileHash)
 	if err != nil {
@@ -96,43 +138,46 @@ func (s *Store) ReadStream(fileHash string) (io.Reader, error) {
 // The data stream is written to a temp file and then the
 // corresponding path is generated from the file content before
 // the temp files is moved to it's final location.
-func (s *Store) WriteStream(r io.Reader) error {
+// Returns the hash of the original file.
+func (s *Store) WriteStream(r io.Reader) (string, error) {
 
 	b := make([]byte, 16)
 	rand.Read(b)
 	err := os.MkdirAll("tmp", os.ModePerm)
 	if err != nil {
-		return err
+		return "", err
 	}
 	tempFilePath := fmt.Sprintf("tmp/%s", hex.EncodeToString(b))
 	tempFile, err := os.Create(tempFilePath)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	tr := io.TeeReader(r, tempFile)
 
-	path, fileName, err := s.PathTransformFunc(tr)
+	path, CASFileName, err := s.PathTransformFunc(tr)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	log.Printf("File path: %v", path+fileName)
+	fileHash := strings.Join(strings.Split(path, "/"), "") + CASFileName
+
+	// log.Printf("File path: %v", path+fileName)
 
 	err = os.MkdirAll(path, os.ModePerm)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	_, err = exec.Command("ls", "-al").Output()
 	if err != nil {
-		log.Printf("Error: %v", err)
+		return "", err
 	}
 
-	_, err = exec.Command("mv", tempFilePath, path+fileName).Output()
+	_, err = exec.Command("mv", tempFilePath, path+CASFileName).Output()
 	if err != nil {
-		log.Printf("Error: %v", err)
+		return "", err
 	}
 
-	return nil
+	return fileHash, nil
 }

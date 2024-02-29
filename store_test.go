@@ -19,23 +19,40 @@ func TestPathTransformFunc(t *testing.T) {
 	}
 }
 
-// func TestStore(t *testing.T) {
+func TestStore(t *testing.T) {
 
-// 	opts := StoreOpts{
-// 		PathTransformFunc:      PathTransformFunc,
-// 		FileHashToFilePathFunc: FileHashToFilePathFunc,
-// 	}
+	opts := StoreOpts{
+		PathTransformFunc:      PathTransformFunc,
+		FileHashToFilePathFunc: FileHashToFilePathFunc,
+	}
 
-// 	store := NewStore(opts)
+	store := NewStore(opts)
 
-// 	r := bytes.NewReader([]byte("File content."))
+	fileContent := "File content."
 
-// 	err := store.WriteStream("testFolder", r)
-// 	if err != nil {
-// 		t.Error(err)
-// 	}
+	r := bytes.NewReader([]byte(fileContent))
 
-// }
+	fileHash, err := store.WriteStream(r)
+	if err != nil {
+		t.Error(err)
+	}
+
+	f, err := store.ReadStream(fileHash)
+	if err != nil {
+		t.Error(err)
+	}
+
+	fileBuf := make([]byte, 1024)
+
+	n, err := f.Read(fileBuf)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if string(fileBuf[:n]) != fileContent {
+		t.Errorf("incorrect file content, expected %s, got %s", fileContent, string(fileBuf[:n]))
+	}
+}
 
 func TestWriteStream(t *testing.T) {
 
@@ -47,9 +64,15 @@ func TestWriteStream(t *testing.T) {
 
 	r := bytes.NewReader([]byte("File content."))
 
-	err := store.WriteStream(r)
+	fileHash, err := store.WriteStream(r)
 	if err != nil {
 		t.Error(err)
+	}
+
+	expectedFileHash := "cd655c0648230dd79b730daae566a148d982ebbc37c19bee4062a4e7c73e1fbc"
+
+	if fileHash != expectedFileHash {
+		t.Errorf("wrong fileHash, expected %s, got %s", expectedFileHash, fileHash)
 	}
 
 }
