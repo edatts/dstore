@@ -5,4 +5,4 @@ run: build
 	./bin/dstore
 
 test: build
-	go test ./... -v
+	go test ./... -v -cover

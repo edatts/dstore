@@ -6,13 +6,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
 )
 
 const (
-	blockSize int = 8
+	blockSize        int = 8
+	maxFileReadBytes int = 200 * 1024 * 1024 // 200 MiB
 )
 
 // Creates the file path from the data streamed through the
@@ -48,6 +50,10 @@ func FileHashToFilePathFunc(fileHash string) (string, error) {
 		return "", fmt.Errorf("invalid file hash: wrong length")
 	}
 
+	if !isValidHex(fileHash) {
+		return "", fmt.Errorf("invalid file hash: input is not valid hex")
+	}
+
 	pathLen := len(fileHash) / blockSize
 	path := ""
 	for i := 0; i < pathLen/2; i++ {
@@ -77,9 +83,9 @@ type BufferedReader struct {
 	buf []byte
 }
 
-// Read() starts the stream reader, returns an error
+// Start() starts the stream reader, returns an error
 // if the file cannot be found.
-func (s *BufferedReader) Read(fileHash string) error {
+func (s *BufferedReader) Start() error {
 
 	return nil
 }
@@ -115,12 +121,46 @@ func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 // file cannot be found.
 func (s *Store) Read(fileHash string) ([]byte, error) {
 
-	return nil, nil
+	// Get file path
+	fullPath, err := FileHashToFilePathFunc(fileHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert hash to file path: %w", err)
+	}
+
+	// Validate that file exists on disk
+	fileInfo, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("file not found: %w", err)
+		}
+		return nil, err
+	}
+
+	// Validate size of file
+	if fileInfo.Size() > int64(maxFileReadBytes) {
+		return nil, fmt.Errorf("file too big, use the provided buffered read method")
+	}
+
+	r, err := s.readStream(fileHash)
+	if err != nil {
+		return nil, err
+	}
+
+	defer r.Close()
+
+	fileBytes := make([]byte, fileInfo.Size())
+	_, err = r.Read(fileBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file into buffer: %w", err)
+	}
+
+	return fileBytes, nil
 }
 
-// Readstream takes the file hash, uses it to find the corresponding
-// file path and returns the file handle to be read from.
-func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
+// The readStream method takes the file hash, uses it to
+// find the corresponding file path and returns the file
+// handle to be read from.
+func (s *Store) readStream(fileHash string) (io.ReadCloser, error) {
 
 	filePath, err := FileHashToFilePathFunc(fileHash)
 	if err != nil {
@@ -129,17 +169,28 @@ func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
 
 	f, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not open file: %w", err)
 	}
 
 	return f, nil
+}
+
+func (s *Store) Write(r io.Reader) (string, error) {
+	fileHash := ""
+
+	fileHash, err := s.writeStream(r)
+	if err != nil {
+		return "", err
+	}
+
+	return fileHash, nil
 }
 
 // The data stream is written to a temp file and then the
 // corresponding path is generated from the file content before
 // the temp files is moved to it's final location.
 // Returns the hash of the original file.
-func (s *Store) WriteStream(r io.Reader) (string, error) {
+func (s *Store) writeStream(r io.Reader) (string, error) {
 
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -180,4 +231,61 @@ func (s *Store) WriteStream(r io.Reader) (string, error) {
 	}
 
 	return fileHash, nil
+}
+
+// The Delete() method removes a file from the storage if it is
+// found. Calling Delete() with a file hash that has no
+// corresponding file will return an error. Providing an invalid
+// file hash will return an error.
+func (s *Store) Delete(fileHash string) error {
+
+	// Get file path
+	fullPath, err := FileHashToFilePathFunc(fileHash)
+	if err != nil {
+		return fmt.Errorf("failed to convert hash to file path: %w", err)
+	}
+
+	// Check if file exists.
+	_, err = os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no such file to delete: %w", err)
+		}
+	}
+
+	// Delete file and any empty directories
+	paths := getDeletePaths(fullPath)
+
+	for _, path := range paths {
+		err = os.Remove(path)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+
+	return nil
+}
+
+// Creates a slice of each branch of the full path
+// as individual paths to be iterated through.
+func getDeletePaths(fullPath string) []string {
+
+	paths := []string{}
+
+	pathComponents := strings.Split(fullPath, "/")
+
+	for i := range pathComponents {
+		paths = append(paths, strings.Join(pathComponents[:len(pathComponents)-i], "/"))
+	}
+
+	return paths
+}
+
+func isValidHex(s string) bool {
+	for _, b := range []byte(s) {
+		if !(b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F') {
+			return false
+		}
+	}
+	return true
 }
