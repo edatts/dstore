@@ -92,82 +92,8 @@ func NewStore(opts StoreOpts) *Store {
 	}
 }
 
-type BufferedReader struct {
-	buf []byte
-	r   io.ReadCloser
-	e   error
-	n   int
-}
-
-// Next() returns true if there is more data and false
-// otherwise. The first call of Next() prepares the
-// first chunk of data.
-func (b *BufferedReader) Next() bool {
-	n, err := b.r.Read(b.buf)
-	if err != nil {
-		if err == io.EOF {
-			b.r.Close()
-			return false
-		}
-		b.e = err
-	}
-	if n == 0 {
-		b.r.Close()
-		return false
-	}
-
-	if n < len(b.buf) {
-		b.buf = b.buf[:n]
-	}
-
-	b.n += n
-
-	return true
-}
-
-// Data() returns the current chunk of buffered data.
-// Next() should be called before calling Data(), calling
-// Data() before Next() will return an empty byte slice.
-func (b *BufferedReader) Data() []byte {
-	return b.buf
-}
-
-// Returns encountered errors. Does not return EOF as this
-// is handled internally by the BufferedReader.
-func (b *BufferedReader) Err() error {
-	return b.e
-}
-
-// Returns the number of bytes read so far
-func (b *BufferedReader) NumBytesRead() int {
-	return b.n
-}
-
-// ReadBuffered() returns a pointer to a BufferedReader,
-// which can be used to fetch the stored file in chunks.
-// An error is returned if the requested file cannot be
-// found.
-func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
-
-	// Check for file
-	if exists, err := s.fileExists(fileHash); !exists {
-		if err != nil {
-			return nil, fmt.Errorf("could not check if file exists: %w", err)
-		}
-		return nil, fmt.Errorf("file not found")
-	}
-
-	r, err := s.readStream(fileHash)
-	if err != nil {
-		return nil, err
-	}
-
-	br := &BufferedReader{
-		buf: make([]byte, bufferedReaderBufSize),
-		r:   r,
-	}
-
-	return br, nil
+func (s *Store) Clear() error {
+	return os.RemoveAll(s.StorageRoot)
 }
 
 func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
@@ -394,4 +320,82 @@ func isValidHex(s string) bool {
 		}
 	}
 	return true
+}
+
+type BufferedReader struct {
+	buf []byte
+	r   io.ReadCloser
+	e   error
+	n   int
+}
+
+// Next() returns true if there is more data and false
+// otherwise. The first call of Next() prepares the
+// first chunk of data.
+func (b *BufferedReader) Next() bool {
+	n, err := b.r.Read(b.buf)
+	if err != nil {
+		if err == io.EOF {
+			b.r.Close()
+			return false
+		}
+		b.e = err
+	}
+	if n == 0 {
+		b.r.Close()
+		return false
+	}
+
+	if n < len(b.buf) {
+		b.buf = b.buf[:n]
+	}
+
+	b.n += n
+
+	return true
+}
+
+// Data() returns the current chunk of buffered data.
+// Next() should be called before calling Data(), calling
+// Data() before Next() will return an empty byte slice.
+func (b *BufferedReader) Data() []byte {
+	return b.buf
+}
+
+// Returns encountered errors. Does not return EOF as this
+// is handled internally by the BufferedReader.
+func (b *BufferedReader) Err() error {
+	return b.e
+}
+
+// Returns the number of bytes read so far
+func (b *BufferedReader) NumBytesRead() int {
+	return b.n
+}
+
+// ReadBuffered() returns a pointer to a BufferedReader,
+// which can be used to fetch the stored file in chunks.
+// An error is returned if the requested file cannot be
+// found.
+func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
+
+	// Check for file
+	if exists, err := s.fileExists(fileHash); !exists {
+		if err != nil {
+			return nil, fmt.Errorf("could not check if file exists: %w", err)
+		}
+		return nil, fmt.Errorf("file not found")
+	}
+
+	r, err := s.readStream(fileHash)
+	if err != nil {
+		return nil, err
+	}
+
+	br := &BufferedReader{
+		buf: make([]byte, bufferedReaderBufSize),
+		r:   r,
+	}
+
+	return br, nil
 }

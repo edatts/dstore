@@ -46,6 +46,85 @@ func TestGetDeletePaths(t *testing.T) {
 	}
 }
 
+func TestWriteStream(t *testing.T) {
+
+	opts := StoreOpts{}
+	store := NewStore(opts)
+
+	r := bytes.NewReader([]byte("writeStream test file content."))
+
+	fileHash, err := store.writeStream(r)
+	if err != nil {
+		t.Error(err)
+	}
+
+	expectedFileHash := "ca36255c6f940d2e8aa2ef2a026cb0ee347c5f85b1b0937bb217cd4c7e54ae23"
+
+	if fileHash != expectedFileHash {
+		t.Errorf("wrong fileHash, expected %s, got %s", expectedFileHash, fileHash)
+	}
+}
+
+func TestReadStream(t *testing.T) {
+
+	opts := StoreOpts{}
+	store := NewStore(opts)
+
+	// Test with invalid hash
+	invalidHash := "he'sNotTheMassiahHe'sAVeryNaughtyHash!"
+	_, err := store.readStream(invalidHash)
+	if err == nil {
+		t.Error("missing error: invalid hash should produce error")
+	}
+
+	// Test with hash of file that does not exist
+	nonExistentHash := sha256.Sum256([]byte("Not a real file"))
+	nonExistentHashHex := hex.EncodeToString(nonExistentHash[:])
+	_, err = store.readStream(nonExistentHashHex)
+	if err == nil {
+		t.Error("missing error: hash for non-existent file should produce error")
+	}
+
+}
+
+func TestRead(t *testing.T) {
+
+	opts := StoreOpts{}
+	store := NewStore(opts)
+
+	// Test with invalid hash
+	invalidHash := "he'sNotTheMassiahHe'sAVeryNaughtyHash!"
+	_, err := store.Read(invalidHash)
+	if err == nil {
+		t.Error("missing error: invalid hash should produce error")
+	}
+
+	// Test with hash of file that does not exist
+	nonExistentHash := sha256.Sum256([]byte("Not a real file"))
+	nonExistentHashHex := hex.EncodeToString(nonExistentHash[:])
+	_, err = store.Read(nonExistentHashHex)
+	if err == nil {
+		t.Error("missing error: hash for non-existent file should produce error")
+	}
+
+	// Test Read() with file that is too big
+	tooBigFile := bytes.NewReader(bytes.Repeat([]byte{'7'}, maxFileReadBytes+1))
+	tooBigFileHash, err := store.Write(tooBigFile)
+	if err != nil {
+		t.Errorf("error writing: %s", err)
+	}
+	_, err = store.Read(tooBigFileHash)
+	if err == nil {
+		t.Error("expected error reading big file")
+	}
+
+	// Clean up big file
+	err = store.Delete(tooBigFileHash)
+	if err != nil {
+		t.Errorf("enexpected error: %s", err)
+	}
+}
+
 func TestStore(t *testing.T) {
 
 	opts := StoreOpts{}
@@ -154,88 +233,7 @@ func TestStore(t *testing.T) {
 		t.Error("expected file not present")
 	}
 
-	// Clean up
-	os.RemoveAll("22c0d8dc")
-}
-
-func TestWriteStream(t *testing.T) {
-
-	opts := StoreOpts{}
-	store := NewStore(opts)
-
-	r := bytes.NewReader([]byte("writeStream test file content."))
-
-	fileHash, err := store.writeStream(r)
-	if err != nil {
-		t.Error(err)
-	}
-
-	expectedFileHash := "ca36255c6f940d2e8aa2ef2a026cb0ee347c5f85b1b0937bb217cd4c7e54ae23"
-
-	if fileHash != expectedFileHash {
-		t.Errorf("wrong fileHash, expected %s, got %s", expectedFileHash, fileHash)
-	}
-
-	// Clean up
-	os.RemoveAll("ca36255c")
-}
-
-func TestReadStream(t *testing.T) {
-
-	opts := StoreOpts{}
-	store := NewStore(opts)
-
-	// Test with invalid hash
-	invalidHash := "he'sNotTheMassiahHe'sAVeryNaughtyHash!"
-	_, err := store.readStream(invalidHash)
-	if err == nil {
-		t.Error("missing error: invalid hash should produce error")
-	}
-
-	// Test with hash of file that does not exist
-	nonExistentHash := sha256.Sum256([]byte("Not a real file"))
-	nonExistentHashHex := hex.EncodeToString(nonExistentHash[:])
-	_, err = store.readStream(nonExistentHashHex)
-	if err == nil {
-		t.Error("missing error: hash for non-existent file should produce error")
-	}
-
-}
-
-func TestRead(t *testing.T) {
-
-	opts := StoreOpts{}
-	store := NewStore(opts)
-
-	// Test with invalid hash
-	invalidHash := "he'sNotTheMassiahHe'sAVeryNaughtyHash!"
-	_, err := store.Read(invalidHash)
-	if err == nil {
-		t.Error("missing error: invalid hash should produce error")
-	}
-
-	// Test with hash of file that does not exist
-	nonExistentHash := sha256.Sum256([]byte("Not a real file"))
-	nonExistentHashHex := hex.EncodeToString(nonExistentHash[:])
-	_, err = store.Read(nonExistentHashHex)
-	if err == nil {
-		t.Error("missing error: hash for non-existent file should produce error")
-	}
-
-	// Test Read() with file that is too big
-	tooBigFile := bytes.NewReader(bytes.Repeat([]byte{'7'}, maxFileReadBytes+1))
-	tooBigFileHash, err := store.Write(tooBigFile)
-	if err != nil {
-		t.Errorf("error writing: %s", err)
-	}
-	_, err = store.Read(tooBigFileHash)
-	if err == nil {
-		t.Error("expected error reading big file")
-	}
-
-	// Clean up big file
-	err = store.Delete(tooBigFileHash)
-	if err != nil {
-		t.Errorf("enexpected error: %s", err)
+	if err = store.Clear(); err != nil {
+		t.Errorf("error clearing store: %s", err)
 	}
 }
