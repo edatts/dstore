@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	// "time"
 
 	"github.com/edatts/dstore/p2p"
 )
@@ -11,54 +12,81 @@ func init() {
 
 }
 
-func main() {
-	// Spin up two nodes locally
-	// node1 := NewTcpNode()
-	// node2 := NewTcpNode()
-
-	handshakeSuccessFunc := func(peer p2p.Peer) error {
-		// Add peer to server.
-
-		return nil
-	}
-
+func makeServer(lAddr string, bootstrapNodes []string) *Server {
 	tcpOpts := p2p.TCPTransportOpts{
-		ListenAddress:      ":3010",
-		ExternalAddress:    "127.0.0.1:3010",
-		HandshakeFunc:      p2p.DefaultHandshake,
-		OnHandshakeSuccess: handshakeSuccessFunc,
+		ListenAddress:   lAddr,
+		ExternalAddress: "127.0.0.1" + lAddr,
+		HandshakeFunc:   p2p.DefaultHandshake,
+		Decoder:         p2p.DefaultDecoder{},
 		// Decoder:       p2p.GobDecoder{},
-		Decoder: p2p.DefaultDecoder{},
 	}
-	tr := p2p.NewTcpTransport(tcpOpts)
+	tr := p2p.NewTCPTransport(tcpOpts)
 
-	tcpOpts.ListenAddress = ":3011"
-	tcpOpts.ExternalAddress = "127.0.0.1:3011"
-	tr2 := p2p.NewTcpTransport(tcpOpts)
-
-	go func() {
-		for {
-			msg := <-tr.MsgChan()
-
-			log.Printf("handling message: %v\n", msg.Content)
-		}
-	}()
-
-	err := tr.ListenAndAccept()
-	if err != nil {
-		log.Fatal(err)
+	serverOpts := ServerOpts{
+		StorageRoot:    "local" + lAddr,
+		Transport:      tr,
+		BootstrapNodes: bootstrapNodes,
 	}
 
-	go func() {
-		conn, err := tr2.Dial(tr.ExternalAddress)
-		if err != nil {
-			log.Printf("%v\n", tr.ExternalAddress)
-			log.Fatal(err)
-		}
+	s := NewServer(serverOpts)
+	s.Transport.(*p2p.TCPTransport).OnPeer = s.OnPeer
 
-		conn.Write([]byte("Hello there"))
-		conn.Close()
-	}()
+	return s
+}
+
+func main() {
+
+	b1 := makeServer(":3010", []string{})
+	b2 := makeServer(":3011", []string{})
+
+	bNodes := []string{":3010", ":3011"}
+
+	s1 := makeServer(":3012", bNodes)
+	s2 := makeServer(":3013", bNodes)
+	s3 := makeServer(":3014", bNodes)
+
+	for _, s := range []*Server{b1, b2, s1, s2, s3} {
+		go func(s *Server) {
+			log.Fatal(s.Start())
+		}(s)
+	}
 
 	select {}
+
+	// tcpOpts := p2p.TCPTransportOpts{
+	// 	ListenAddress:      ":3010",
+	// 	ExternalAddress:    "127.0.0.1:3010",
+	// 	HandshakeFunc:      p2p.DefaultHandshake,
+	// 	OnHandshakeSuccess: p2p.DefaultOnHandshakeSuccess,
+	// 	Decoder:            p2p.DefaultDecoder{},
+	// 	// Decoder:       p2p.GobDecoder{},
+	// }
+	// tr := p2p.NewTCPTransport(tcpOpts)
+
+	// serverOpts := ServerOpts{
+	// 	StorageRoot:    "local_3010",
+	// 	Transport:      tr,
+	// 	BootstrapNodes: []string{":4010"},
+	// }
+
+	// server := NewServer(serverOpts)
+
+	// go func() {
+	// 	time.Sleep(time.Second * 10)
+	// 	server.Stop()
+	// }()
+
+	// if err := server.Start(); err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// go func() {
+	// 	for {
+	// 		msg := <-tr.MsgChan()
+
+	// 		log.Printf("handling message: %v\n", msg.Content)
+	// 	}
+	// }()
+
+	// select {}
 }

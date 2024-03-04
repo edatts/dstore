@@ -19,3 +19,8 @@ func DefaultHandshake(any) error {
 	}
 	return nil
 }
+
+func DefaultOnHandshakeSuccess(p Peer) error {
+
+	return nil
+}

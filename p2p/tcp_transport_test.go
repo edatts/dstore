@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestTcpTransport(t *testing.T) {
+func TestTCPTransport(t *testing.T) {
 	listenAddr := ":3010"
 	externalAddr := "127.0.0.1:3010"
 	opts := TCPTransportOpts{
@@ -15,7 +15,7 @@ func TestTcpTransport(t *testing.T) {
 		HandshakeFunc:   DefaultHandshake,
 		Decoder:         DefaultDecoder{},
 	}
-	transport := NewTcpTransport(opts)
+	transport := NewTCPTransport(opts)
 
 	assert.Equal(t, transport.ListenAddress, listenAddr)
 
