@@ -6,21 +6,22 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
 )
 
 const (
-	blockSize        int = 8
-	maxFileReadBytes int = 200 * 1024 * 1024 // 200 MiB
+	blockSize             int    = 8
+	maxFileReadBytes      int    = 200 * 1024 * 1024 // 200 MiB
+	bufferedReaderBufSize int    = 16 * 1024         // 16 KiB
+	defaultStoragePath    string = "storage"
 )
 
 // Creates the file path from the data streamed through the
 // input reader, this way the path and file name are entirely
 // derived from the content of the file to be stored.
-func PathTransformFunc(r io.Reader) (string, string, error) {
+func DefaultPathTransformFunc(r io.Reader) (string, string, error) {
 	sha256Hash := sha256.New()
 	_, err := io.Copy(sha256Hash, r)
 	if err != nil {
@@ -44,7 +45,7 @@ func PathTransformFunc(r io.Reader) (string, string, error) {
 
 // Validates the provided hash then trnasforms it into the
 // corresponding file path.
-func FileHashToFilePathFunc(fileHash string) (string, error) {
+func DefaultFileHashToFilePathFunc(fileHash string) (string, error) {
 
 	if len(fileHash) != 64 {
 		return "", fmt.Errorf("invalid file hash: wrong length")
@@ -67,6 +68,9 @@ func FileHashToFilePathFunc(fileHash string) (string, error) {
 type StoreOpts struct {
 	PathTransformFunc      func(io.Reader) (string, string, error)
 	FileHashToFilePathFunc func(string) (string, error)
+	// Storage root is the path to the directory where all the
+	// child directories and files will be stored.
+	StorageRoot string
 }
 
 type Store struct {
@@ -74,6 +78,15 @@ type Store struct {
 }
 
 func NewStore(opts StoreOpts) *Store {
+	if len(opts.StorageRoot) == 0 {
+		opts.StorageRoot = defaultStoragePath
+	}
+	if opts.PathTransformFunc == nil {
+		opts.PathTransformFunc = DefaultPathTransformFunc
+	}
+	if opts.FileHashToFilePathFunc == nil {
+		opts.FileHashToFilePathFunc = DefaultFileHashToFilePathFunc
+	}
 	return &Store{
 		opts,
 	}
@@ -81,29 +94,53 @@ func NewStore(opts StoreOpts) *Store {
 
 type BufferedReader struct {
 	buf []byte
-}
-
-// Start() starts the stream reader, returns an error
-// if the file cannot be found.
-func (s *BufferedReader) Start() error {
-
-	return nil
+	r   io.ReadCloser
+	e   error
+	n   int
 }
 
 // Next() returns true if there is more data and false
 // otherwise. The first call of Next() prepares the
 // first chunk of data.
-func (s *BufferedReader) Next() bool {
+func (b *BufferedReader) Next() bool {
+	n, err := b.r.Read(b.buf)
+	if err != nil {
+		if err == io.EOF {
+			b.r.Close()
+			return false
+		}
+		b.e = err
+	}
+	if n == 0 {
+		b.r.Close()
+		return false
+	}
 
-	return false
+	if n < len(b.buf) {
+		b.buf = b.buf[:n]
+	}
+
+	b.n += n
+
+	return true
 }
 
 // Data() returns the current chunk of buffered data.
 // Next() should be called before calling Data(), calling
 // Data() before Next() will return an empty byte slice.
-func (s *BufferedReader) Data() []byte {
+func (b *BufferedReader) Data() []byte {
+	return b.buf
+}
 
-	return s.buf
+// Returns encountered errors. Does not return EOF as this
+// is handled internally by the BufferedReader.
+func (b *BufferedReader) Err() error {
+	return b.e
+}
+
+// Returns the number of bytes read so far
+func (b *BufferedReader) NumBytesRead() int {
+	return b.n
 }
 
 // ReadBuffered() returns a pointer to a BufferedReader,
@@ -112,7 +149,42 @@ func (s *BufferedReader) Data() []byte {
 // found.
 func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 
-	return nil, nil
+	// Check for file
+	if exists, err := s.fileExists(fileHash); !exists {
+		if err != nil {
+			return nil, fmt.Errorf("could not check if file exists: %w", err)
+		}
+		return nil, fmt.Errorf("file not found")
+	}
+
+	r, err := s.readStream(fileHash)
+	if err != nil {
+		return nil, err
+	}
+
+	br := &BufferedReader{
+		buf: make([]byte, bufferedReaderBufSize),
+		r:   r,
+	}
+
+	return br, nil
+}
+
+func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
+
+	if exists, err := s.fileExists(fileHash); !exists {
+		if err != nil {
+			return nil, fmt.Errorf("could not check if file exists: %w", err)
+		}
+		return nil, fmt.Errorf("file not found")
+	}
+
+	rc, err := s.readStream(fileHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return rc, nil
 }
 
 // Read will read the file into a byte slice and return it.
@@ -122,10 +194,12 @@ func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 func (s *Store) Read(fileHash string) ([]byte, error) {
 
 	// Get file path
-	fullPath, err := FileHashToFilePathFunc(fileHash)
+	filePath, err := s.FileHashToFilePathFunc(fileHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert hash to file path: %w", err)
 	}
+
+	fullPath := s.StorageRoot + "/" + filePath
 
 	// Validate that file exists on disk
 	fileInfo, err := os.Stat(fullPath)
@@ -162,12 +236,14 @@ func (s *Store) Read(fileHash string) ([]byte, error) {
 // handle to be read from.
 func (s *Store) readStream(fileHash string) (io.ReadCloser, error) {
 
-	filePath, err := FileHashToFilePathFunc(fileHash)
+	filePath, err := s.FileHashToFilePathFunc(fileHash)
 	if err != nil {
 		return nil, err
 	}
 
-	f, err := os.Open(filePath)
+	fullPath := s.StorageRoot + "/" + filePath
+
+	f, err := os.Open(fullPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open file: %w", err)
 	}
@@ -211,11 +287,12 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 		return "", err
 	}
 
+	// Get file hash before creating full path.
 	fileHash := strings.Join(strings.Split(path, "/"), "") + CASFileName
 
-	// log.Printf("File path: %v", path+fileName)
+	fullPath := s.StorageRoot + "/" + path
 
-	err = os.MkdirAll(path, os.ModePerm)
+	err = os.MkdirAll(fullPath, os.ModePerm)
 	if err != nil {
 		return "", err
 	}
@@ -225,7 +302,7 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 		return "", err
 	}
 
-	_, err = exec.Command("mv", tempFilePath, path+CASFileName).Output()
+	_, err = exec.Command("mv", tempFilePath, fullPath+CASFileName).Output()
 	if err != nil {
 		return "", err
 	}
@@ -239,27 +316,29 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 // file hash will return an error.
 func (s *Store) Delete(fileHash string) error {
 
+	// Check for file
+	if exists, err := s.fileExists(fileHash); !exists {
+		if err != nil {
+			return fmt.Errorf("could not check if file exists: %w", err)
+		}
+		return fmt.Errorf("file not found")
+	}
+
 	// Get file path
-	fullPath, err := FileHashToFilePathFunc(fileHash)
+	filePath, err := s.FileHashToFilePathFunc(fileHash)
 	if err != nil {
 		return fmt.Errorf("failed to convert hash to file path: %w", err)
 	}
 
-	// Check if file exists.
-	_, err = os.Stat(fullPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no such file to delete: %w", err)
-		}
-	}
+	fullPath := s.StorageRoot + "/" + filePath
 
 	// Delete file and any empty directories
-	paths := getDeletePaths(fullPath)
+	paths := s.getDeletePaths(fullPath)
 
 	for _, path := range paths {
 		err = os.Remove(path)
 		if err != nil {
-			log.Println(err)
+			return err
 		}
 	}
 
@@ -268,17 +347,44 @@ func (s *Store) Delete(fileHash string) error {
 
 // Creates a slice of each branch of the full path
 // as individual paths to be iterated through.
-func getDeletePaths(fullPath string) []string {
-
+func (s *Store) getDeletePaths(fullPath string) []string {
 	paths := []string{}
+
+	// Strip off the storage root first
+	fullPath = strings.Replace(fullPath, s.StorageRoot+"/", "", 1)
 
 	pathComponents := strings.Split(fullPath, "/")
 
 	for i := range pathComponents {
-		paths = append(paths, strings.Join(pathComponents[:len(pathComponents)-i], "/"))
+		paths = append(paths, s.StorageRoot+"/"+strings.Join(pathComponents[:len(pathComponents)-i], "/"))
 	}
 
 	return paths
+}
+
+// Returns true if the corresponding file exists, false if the
+// file does not exist, and false and an error if there was
+// some other error.
+func (s *Store) fileExists(fileHash string) (bool, error) {
+
+	// Get file path
+	filePath, err := s.FileHashToFilePathFunc(fileHash)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert hash to file path: %w", err)
+	}
+
+	fullPath := s.StorageRoot + "/" + filePath
+
+	// Check if file exists.
+	_, err = os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check if file exists: %w", err)
+	}
+
+	return true, nil
 }
 
 func isValidHex(s string) bool {
