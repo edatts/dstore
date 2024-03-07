@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	// "time"
 
@@ -23,7 +24,7 @@ func makeServer(lAddr string, bootstrapNodes []string) *Server {
 	tr := p2p.NewTCPTransport(tcpOpts)
 
 	serverOpts := ServerOpts{
-		StorageRoot:    "local" + lAddr,
+		StorageRoot:    "test-storage/local" + lAddr,
 		Transport:      tr,
 		BootstrapNodes: bootstrapNodes,
 	}
@@ -49,6 +50,12 @@ func main() {
 		go func(s *Server) {
 			log.Fatal(s.Start())
 		}(s)
+	}
+
+	data := bytes.NewReader([]byte("I am the content of a file."))
+	_, err := s1.StoreData(data)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	select {}

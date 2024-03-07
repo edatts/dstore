@@ -6,24 +6,31 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 )
 
 // tcpPeer represents a remote node over a tcp connection.
 type TCPPeer struct {
-	conn      net.Conn
+	// Embedding the underlying connection for the peer allows
+	// us to make use of io.Reader and io.Writer directly on
+	// the peer.
+	net.Conn
+
 	isOutboud bool
+
+	wg *sync.WaitGroup
 }
 
 func NewTcpPeer(conn net.Conn, isOutbound bool) *TCPPeer {
 	return &TCPPeer{
-		conn:      conn,
+		Conn:      conn,
 		isOutboud: isOutbound,
+		wg:        &sync.WaitGroup{},
 	}
 }
 
 func (t *TCPPeer) Send(b []byte) error {
-
-	n, err := t.conn.Write(b)
+	n, err := t.Conn.Write(b)
 	if err != nil {
 		return fmt.Errorf("error sending to peer (%s): %w", t.RemoteAddr(), err)
 	}
@@ -33,12 +40,8 @@ func (t *TCPPeer) Send(b []byte) error {
 	return nil
 }
 
-func (t *TCPPeer) RemoteAddr() net.Addr {
-	return t.conn.RemoteAddr()
-}
-
-func (t *TCPPeer) Close() error {
-	return t.conn.Close()
+func (t *TCPPeer) WaitGroup() *sync.WaitGroup {
+	return t.wg
 }
 
 type TCPTransport struct {
@@ -65,7 +68,6 @@ func NewTCPTransport(opts TCPTransportOpts) *TCPTransport {
 }
 
 func (t *TCPTransport) Dial(addr string) error {
-
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
@@ -97,7 +99,7 @@ func (t *TCPTransport) ListenAndAccept() error {
 				continue
 			}
 
-			log.Printf("New incoming connection %+v\n", conn)
+			log.Printf("(%s): New incoming connection %+v\n", t.LAddr(), conn)
 			go t.handleConn(conn, false)
 		}
 	}()
@@ -137,22 +139,32 @@ func (t *TCPTransport) handleConn(conn net.Conn, isOutbound bool) {
 	msg := Message{}
 	// Read loop
 	for {
-		err := t.Decoder.Decode(conn, &msg)
+		buf := make([]byte, 2024)
+		n, err := conn.Read(buf)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				log.Printf("Dropping peer for error: %s", err)
 				conn.Close()
 				return
 			}
-			log.Printf("Error decoding message: %s\n", err)
+			log.Printf("Error reading message: %s\n", err)
 			// Should we drop peer after n message errors?
-
 		}
 
 		msg.From = conn.RemoteAddr()
+		msg.Payload = buf[:n]
 
-		log.Printf("Recieved message: %+v\n", msg)
+		// log.Printf("Recieved message from: %s\n", conn.RemoteAddr().String())
+		// log.Printf("Message content: %s\n", string(msg.Content))
 
+		peer.wg.Add(1)
 		t.msgCh <- msg
+		// log.Println("Pausing read loop, waiting for message to be processed.")
+		peer.wg.Wait()
+		log.Printf("(%s): Message processed, resuming read loop.", t.LAddr())
 	}
+}
+
+func (t *TCPTransport) LAddr() string {
+	return t.ListenAddress
 }

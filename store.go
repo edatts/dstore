@@ -18,6 +18,10 @@ const (
 	defaultStoragePath    string = "storage"
 )
 
+type Metadata struct {
+	FileSize int64
+}
+
 // Creates the file path from the data streamed through the
 // input reader, this way the path and file name are entirely
 // derived from the content of the file to be stored.
@@ -200,6 +204,7 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	tempFilePath := fmt.Sprintf("tmp/%s", hex.EncodeToString(b))
 	tempFile, err := os.Create(tempFilePath)
 	if err != nil {
@@ -223,10 +228,10 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 		return "", err
 	}
 
-	_, err = exec.Command("ls", "-al").Output()
-	if err != nil {
-		return "", err
-	}
+	// _, err = exec.Command("ls", "-al").Output()
+	// if err != nil {
+	// 	return "", err
+	// }
 
 	_, err = exec.Command("mv", tempFilePath, fullPath+CASFileName).Output()
 	if err != nil {
@@ -320,6 +325,20 @@ func isValidHex(s string) bool {
 		}
 	}
 	return true
+}
+
+func (s *Store) GetFileSize(fileHash string) (int64, error) {
+	filePath, err := s.FileHashToFilePathFunc(fileHash)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get path from file has: %w", err)
+	}
+
+	fi, err := os.Stat(s.StorageRoot + "/" + filePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	return fi.Size(), nil
 }
 
 type BufferedReader struct {
