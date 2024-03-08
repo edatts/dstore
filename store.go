@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -100,13 +101,10 @@ func (s *Store) Clear() error {
 	return os.RemoveAll(s.StorageRoot)
 }
 
-func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
+func (s *Store) Read(fileHash string) (io.ReadCloser, error) {
 
-	if exists, err := s.fileExists(fileHash); !exists {
-		if err != nil {
-			return nil, fmt.Errorf("could not check if file exists: %w", err)
-		}
-		return nil, fmt.Errorf("file not found")
+	if exists := s.fileExists(fileHash); !exists {
+		return nil, fmt.Errorf("file not found on disk")
 	}
 
 	rc, err := s.readStream(fileHash)
@@ -121,7 +119,7 @@ func (s *Store) ReadStream(fileHash string) (io.ReadCloser, error) {
 // If the requested file is too big then Read() will return
 // an error. An error will also be returned if the requested
 // file cannot be found.
-func (s *Store) Read(fileHash string) ([]byte, error) {
+func (s *Store) ReadBytes(fileHash string) ([]byte, error) {
 
 	// Get file path
 	filePath, err := s.FileHashToFilePathFunc(fileHash)
@@ -248,10 +246,7 @@ func (s *Store) writeStream(r io.Reader) (string, error) {
 func (s *Store) Delete(fileHash string) error {
 
 	// Check for file
-	if exists, err := s.fileExists(fileHash); !exists {
-		if err != nil {
-			return fmt.Errorf("could not check if file exists: %w", err)
-		}
+	if exists := s.fileExists(fileHash); !exists {
 		return fmt.Errorf("file not found")
 	}
 
@@ -296,12 +291,13 @@ func (s *Store) getDeletePaths(fullPath string) []string {
 // Returns true if the corresponding file exists, false if the
 // file does not exist, and false and an error if there was
 // some other error.
-func (s *Store) fileExists(fileHash string) (bool, error) {
+func (s *Store) fileExists(fileHash string) bool {
 
 	// Get file path
 	filePath, err := s.FileHashToFilePathFunc(fileHash)
 	if err != nil {
-		return false, fmt.Errorf("failed to convert hash to file path: %w", err)
+		log.Printf("error: failed to convert hash to file path: %s", err)
+		return false
 	}
 
 	fullPath := s.StorageRoot + "/" + filePath
@@ -310,12 +306,13 @@ func (s *Store) fileExists(fileHash string) (bool, error) {
 	_, err = os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false
 		}
-		return false, fmt.Errorf("failed to check if file exists: %w", err)
+		log.Printf("error: failed to check if file exists: %s", err)
+		return false
 	}
 
-	return true, nil
+	return true
 }
 
 func isValidHex(s string) bool {
@@ -399,10 +396,7 @@ func (b *BufferedReader) NumBytesRead() int {
 func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 
 	// Check for file
-	if exists, err := s.fileExists(fileHash); !exists {
-		if err != nil {
-			return nil, fmt.Errorf("could not check if file exists: %w", err)
-		}
+	if exists := s.fileExists(fileHash); !exists {
 		return nil, fmt.Errorf("file not found")
 	}
 

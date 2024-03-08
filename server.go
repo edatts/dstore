@@ -14,7 +14,7 @@ import (
 
 func init() {
 	gob.Register(PayloadData_Notify_NewFile{})
-	gob.Register(PayloadData_RequestFile{})
+	gob.Register(PayloadData_Request_GetFile{})
 }
 
 type ServerOpts struct {
@@ -110,7 +110,9 @@ func (s *Server) StartMessageLoop() {
 
 			// log.Println("Resuming peer read loop...")
 
-			p.WaitGroup().Done()
+			_ = p
+			// Only call this when the exchange is complete.
+			// p.WaitGroup().Done()
 
 		case <-s.quitCh:
 			log.Println("Message received on quit channel, stopping server.")
@@ -130,7 +132,12 @@ func (s *Server) BroadcastData(r io.ReadCloser) error {
 
 	mw := io.MultiWriter(peers...)
 
-	_, err := io.Copy(mw, r)
+	_, err := io.Copy(mw, bytes.NewReader([]byte{0x1}))
+	if err != nil {
+		return fmt.Errorf("failed to copy data to peers: %w", err)
+	}
+
+	_, err = io.Copy(mw, r)
 	if err != nil {
 		return fmt.Errorf("failed to copy data to peers: %w", err)
 	}
@@ -142,16 +149,41 @@ func (s *Server) BroadcastData(r io.ReadCloser) error {
 	return nil
 }
 
-func (s *Server) BroadcastMessage(m *p2p.Message) error {
+func (s *Server) BroadcastMessage(m *p2p.Message) {
 	for _, peer := range s.peers.Values() {
+		if err := peer.Send([]byte{p2p.TypeMessage}); err != nil {
+			log.Printf("Failed sending message byte to peer (%s): %s", peer.RemoteAddr(), err)
+		}
 		if err := peer.Send(m.Payload); err != nil {
-			return fmt.Errorf("failed to send payload to peers: %w", err)
+			log.Printf("Failed sending payload to peer (%s): %s", peer.RemoteAddr(), err)
 		}
 	}
-	return nil
 }
 
 func (s *Server) handleMessage(msg *p2p.Message) error {
+	// The issue with handling messages in this way is that a lot of the
+	// operations and exchanges between peers that we want to carry out
+	// require multiple messages to be sent between peers that need to be
+	// processed in a particular order. This function only really works for
+	// one off messages because there is no way to prevent race conditions
+	// using this central handler.
+	//
+	// If we need messages to be processed sequentially in a particular
+	// order then we need a more robust set of handling logic to ensure
+	// that we prevent race conditions.
+	//
+	// One way we could do this is by multiplexing our connection into
+	// multiple channels such that each operation will only receive
+	// messages that it would expect to recieve as part of that operation.
+	// This would probably be the most performat method but would be
+	// complex to implement.
+	//
+	// Alternatively we could simply queue all the messages we receive
+	// for each peer and then loop through them, re-queueing the ones that
+	// we wouldn't expect to handle as part of the current operation. This
+	// would be less performant and would require timeouts on each operation
+	//
+
 	r := bytes.NewReader(msg.Payload)
 	payload := Payload{}
 	if err := gob.NewDecoder(r).Decode(&payload); err != nil {
@@ -160,18 +192,21 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 
 	switch payload.Type {
 	case PayloadType_Notify_NewFile:
+		peer, ok := s.peers.Get(msg.From)
+		if !ok {
+			return fmt.Errorf("peer (%s) not found", msg.From)
+		}
+
 		// Get file hash and metadata
-		data := payload.Data.(PayloadData_Notify_NewFile)
+		data, ok := payload.Data.(PayloadData_Notify_NewFile)
+		if !ok {
+			return fmt.Errorf("invalid payload, could not type assert payload data")
+		}
+
 		fileHash := data.FileHash
 
 		// Check if we have file.
-		exists, err := s.store.fileExists(fileHash)
-		if err != nil {
-			return err
-		}
-
-		// If we have the file, return
-		if exists {
+		if s.HasFile(fileHash) {
 			log.Printf("(%s): File already present on disk.", s.Transport.LAddr())
 			return nil
 		}
@@ -182,70 +217,83 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 			return nil
 		}
 
-		// Otherwise, request the file from the peer that notified us.
-		encoded := new(bytes.Buffer)
-		payload := Payload{
-			Type: PayloadType_RequestFile,
-			Data: PayloadData_RequestFile{
-				FileHash: fileHash,
-			},
-		}
+		// // Otherwise, request the file from the peer that notified us.
+		// encoded := new(bytes.Buffer)
+		// payload := Payload{
+		// 	Type: PayloadType_Request_GetFile,
+		// 	Data: PayloadData_Request_GetFile{
+		// 		FileHash: fileHash,
+		// 	},
+		// }
 
-		err = gob.NewEncoder(encoded).Encode(payload)
-		if err != nil {
-			return err
-		}
+		// err := gob.NewEncoder(encoded).Encode(payload)
+		// if err != nil {
+		// 	return err
+		// }
 
-		peer, _ := s.peers.Get(msg.From)
-		err = peer.Send(encoded.Bytes())
-		if err != nil {
-			return err
-		}
+		// err = peer.Send(encoded.Bytes())
+		// if err != nil {
+		// 	return err
+		// }
+
+		// s.pendingFiles.Add(fileHash)
+		// defer s.pendingFiles.Remove(fileHash)
+
+		// // Now write the peers response to disk.
+		// hash, err := s.StoreFile(io.LimitReader(peer, data.Metadata.FileSize))
+		// if err != nil {
+		// 	// We might need to clean up tmp/ here as well.
+		// 	return fmt.Errorf("failed to store file: %w", err)
+		// }
 
 		s.pendingFiles.Add(fileHash)
 		defer s.pendingFiles.Remove(fileHash)
 
-		// Now write the peers response to disk.
-
-		hash, err := s.StoreData(io.LimitReader(peer, data.Metadata.FileSize))
+		hash, err := s.StoreFile(io.LimitReader(peer, data.Metadata.FileSize))
 		if err != nil {
 			// We might need to clean up tmp/ here as well.
 			return fmt.Errorf("failed to store file: %w", err)
 		}
-
-		// hash, err := s.store.Write(io.LimitReader(peer, data.Metadata.FileSize))
-		// if err != nil {
-		// 	// We might need to clean up tmp/ here as well.
-		// 	return fmt.Errorf("failed writing to disk: %w", err)
-		// }
 
 		if hash != fileHash {
 			panic(fmt.Sprintf("wrong file hash after write, got %s, expected %s", hash, fileHash))
 			// return fmt.Errorf("wrong file hash after write, got %s, expected %s", hash, fileHash)
 		}
 
-	case PayloadType_RequestFile:
-		// A file has been requested by a peer. For now a peer will only request
-		// a file if we have notified them that we have it so we don't need to
-		// check for the file before streaming it to them.
-		data := payload.Data.(PayloadData_RequestFile)
-		fileHash := data.FileHash
+		peer.WaitGroup().Done()
 
-		f, err := s.store.ReadStream(fileHash)
-		if err != nil {
-			return fmt.Errorf("failed to read file: %w", err)
-		}
-
+	case PayloadType_Request_GetFile:
 		peer, ok := s.peers.Get(msg.From)
 		if !ok {
 			return fmt.Errorf("peer (%s) not found", msg.From)
 		}
 
+		// A file has been requested by a peer. For now a peer will only request
+		// a file if we have notified them that we have it so we don't need to
+		// check for the file before streaming it to them.
+		data, ok := payload.Data.(PayloadData_Request_GetFile)
+		if !ok {
+			// TODO: If peer sends us an invalid payload, drop them.
+			return fmt.Errorf("invalid payload, could not type assert payload data")
+		}
+
+		// Check for file
+		fileHash := data.FileHash
+
+		f, err := s.store.Read(fileHash)
+		if err != nil {
+			peer.WaitGroup().Done()
+			return fmt.Errorf("failed to read file: %w", err)
+		}
+
 		// Stream the file data to peer.
 		_, err = io.Copy(peer, f)
 		if err != nil {
+			// TODO:  If we fail streaming to peer, drop them.
 			return fmt.Errorf("failed streaming file to peer (%s): %w", msg.From, err)
 		}
+
+		peer.WaitGroup().Done()
 
 		err = f.Close()
 		if err != nil {
@@ -256,26 +304,71 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 	return nil
 }
 
+func (s *Server) HasFile(fileHash string) bool {
+	return s.store.fileExists(fileHash)
+}
+
+// func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
+// 	if s.HasFile(fileHash) {
+// 		return s.store.Read(fileHash)
+// 	}
+
+// 	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
+
+// 	// Ask all peers if they have the file until we find one that does.
+// 	// payload := Payload{
+// 	// 	Type: PayloadType_Request_GetFile,
+// 	// 	Data: PayloadData_Request_GetFile{
+// 	// 		FileHash: fileHash,
+// 	// 	},
+// 	// }
+
+// 	for _, peer := range s.peers.Values() {
+// 		// Send hasFile query to peer
+// 		payload := Payload{
+// 			Type: PayloadType_Query_HasFile,
+// 			Data: PayloadData_Query_HasFile{
+// 				FileHash: fileHash,
+// 			},
+// 		}
+
+// 		// Wait for response
+
+// 		// If response is an unexpected, different, message then we
+// 		// need to queue it for processing after we get the expecetd
+// 		// response because the peer might send a message at the same
+// 		// time as us and this creates a race condition.
+
+// 	}
+
+// 	r, err := s.store.Read(fileHash)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to read file: %w", err)
+// 	}
+
+// 	return r, nil
+// }
+
 // Stores a file and returns the file hash. Gossips the
 // file content to other nodes for replicated storage.
-func (s *Server) StoreData(r io.Reader) (string, error) {
+func (s *Server) StoreFile(r io.Reader) (string, error) {
 
 	// Store file to disk.
-	hash, err := s.store.Write(r)
+	fileHash, err := s.store.Write(r)
 	if err != nil {
 		return "", fmt.Errorf("failed to write file to disk: %w", err)
 	}
 
-	fileSize, err := s.store.GetFileSize(hash)
+	fileSize, err := s.store.GetFileSize(fileHash)
 	if err != nil {
-		return hash, fmt.Errorf("failed to get size of file: %w", err)
+		return fileHash, fmt.Errorf("failed to get size of file: %w", err)
 	}
 
 	buf := new(bytes.Buffer)
 	payload := Payload{
 		Type: PayloadType_Notify_NewFile,
 		Data: PayloadData_Notify_NewFile{
-			FileHash: hash,
+			FileHash: fileHash,
 			Metadata: Metadata{
 				FileSize: fileSize,
 			},
@@ -284,17 +377,31 @@ func (s *Server) StoreData(r io.Reader) (string, error) {
 
 	err = gob.NewEncoder(buf).Encode(payload)
 	if err != nil {
-		return hash, fmt.Errorf("failed to encode file hash to payload data: %w", err)
+		return fileHash, fmt.Errorf("failed to encode file hash to payload data: %w", err)
 	}
 
 	msg := &p2p.Message{
 		Payload: buf.Bytes(),
 	}
 
-	// Notify peers of new file.
-	if err := s.BroadcastMessage(msg); err != nil {
-		return hash, fmt.Errorf("error broadcasting file to network: %w", err)
+	s.BroadcastMessage(msg)
+
+	f, err := s.store.Read(fileHash)
+	if err != nil {
+		return fileHash, fmt.Errorf("failed to read file: %w", err)
 	}
+
+	err = s.BroadcastData(f)
+	if err != nil {
+		return fileHash, fmt.Errorf("error broadcasting data: %w", err)
+	}
+
+	f.Close()
+
+	// Notify peers of new file.
+	// if err := s.BroadcastMessage(msg); err != nil {
+	// 	return hash, fmt.Errorf("error broadcasting file to network: %w", err)
+	// }
 
 	// For each peer we should probably wait for a response so that
 	// we know which peers already have the file and which peers need
@@ -304,7 +411,7 @@ func (s *Server) StoreData(r io.Reader) (string, error) {
 	// 	return "", fmt.Errorf("error broadcasting file to network: %w", err)
 	// }
 
-	return hash, nil
+	return fileHash, nil
 }
 
 func (s *Server) OnPeer(peer p2p.Peer) error {

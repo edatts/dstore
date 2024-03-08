@@ -136,14 +136,14 @@ func (t *TCPTransport) handleConn(conn net.Conn, isOutbound bool) {
 		return
 	}
 
-	msg := Message{}
 	// Read loop
 	for {
-		buf := make([]byte, 2024)
-		n, err := conn.Read(buf)
+		msg := Message{}
+		msg.From = conn.RemoteAddr()
+		err := t.Decoder.Decode(conn, &msg)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-				log.Printf("Dropping peer for error: %s", err)
+				log.Printf("Dropping peer for error: %s\n", err)
 				conn.Close()
 				return
 			}
@@ -151,17 +151,21 @@ func (t *TCPTransport) handleConn(conn net.Conn, isOutbound bool) {
 			// Should we drop peer after n message errors?
 		}
 
-		msg.From = conn.RemoteAddr()
-		msg.Payload = buf[:n]
+		if msg.IncomingStream {
+			peer.wg.Add(1)
+			log.Printf("(%s): Pausing read loop, waiting for stream to finish.\n", t.LAddr())
+			peer.wg.Wait()
+			log.Printf("(%s): Stream finished, resuming read loop.\n", t.LAddr())
+			continue
+		}
 
-		// log.Printf("Recieved message from: %s\n", conn.RemoteAddr().String())
-		// log.Printf("Message content: %s\n", string(msg.Content))
-
-		peer.wg.Add(1)
 		t.msgCh <- msg
-		// log.Println("Pausing read loop, waiting for message to be processed.")
-		peer.wg.Wait()
-		log.Printf("(%s): Message processed, resuming read loop.", t.LAddr())
+
+		// peer.wg.Add(1)
+		// log.Printf("Paused read loop, waiting for message to be processed.\n")
+		// peer.wg.Wait()
+		// log.Printf("Resumed read loop.")
+
 	}
 }
 

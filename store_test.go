@@ -94,7 +94,7 @@ func TestRead(t *testing.T) {
 
 	// Test with invalid hash
 	invalidHash := "he'sNotTheMassiahHe'sAVeryNaughtyHash!"
-	_, err := store.Read(invalidHash)
+	_, err := store.ReadBytes(invalidHash)
 	if err == nil {
 		t.Error("missing error: invalid hash should produce error")
 	}
@@ -102,7 +102,7 @@ func TestRead(t *testing.T) {
 	// Test with hash of file that does not exist
 	nonExistentHash := sha256.Sum256([]byte("Not a real file"))
 	nonExistentHashHex := hex.EncodeToString(nonExistentHash[:])
-	_, err = store.Read(nonExistentHashHex)
+	_, err = store.ReadBytes(nonExistentHashHex)
 	if err == nil {
 		t.Error("missing error: hash for non-existent file should produce error")
 	}
@@ -113,7 +113,7 @@ func TestRead(t *testing.T) {
 	if err != nil {
 		t.Errorf("error writing: %s", err)
 	}
-	_, err = store.Read(tooBigFileHash)
+	_, err = store.ReadBytes(tooBigFileHash)
 	if err == nil {
 		t.Error("expected error reading big file")
 	}
@@ -141,7 +141,7 @@ func TestStore(t *testing.T) {
 	}
 
 	// Test Read()
-	fileBytes, err := store.Read(fileHash)
+	fileBytes, err := store.ReadBytes(fileHash)
 	if err != nil {
 		t.Errorf("failed to read: %s", err)
 	}
@@ -150,8 +150,8 @@ func TestStore(t *testing.T) {
 		t.Errorf("incorrect file content, expected %s, got %s", fileContent, string(fileBytes))
 	}
 
-	// Test ReadStream()
-	rc, err := store.ReadStream(fileHash)
+	// Test Read()
+	rc, err := store.Read(fileHash)
 	if err != nil {
 		t.Errorf("failed to get readCloser: %s", err)
 	}

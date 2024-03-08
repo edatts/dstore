@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log"
+
 	// "time"
 
 	"github.com/edatts/dstore/p2p"
@@ -53,10 +54,30 @@ func main() {
 	}
 
 	data := bytes.NewReader([]byte("I am the content of a file."))
-	_, err := s1.StoreData(data)
+	_, err := s1.StoreFile(data)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// noFileBytes := sha256.Sum256([]byte("File we don't have"))
+	// noFileHash := hex.EncodeToString(noFileBytes[:])
+	// _ = noFileHash
+
+	// fileBytes := sha256.Sum256([]byte("I am the content of a file."))
+	// fileHash := hex.EncodeToString(fileBytes[:])
+	// _ = fileHash
+
+	// r, err := s2.GetFile(noFileHash)
+	// if err != nil {
+	// 	log.Fatal("Could not get file")
+	// }
+
+	// gotFileBytes, err := io.ReadAll(r)
+	// if err != nil {
+	// 	log.Fatal("failed to read all gotFileBytes.")
+	// }
+
+	// log.Printf("Got file with content: %s", string(gotFileBytes))
 
 	select {}
 
