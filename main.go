@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"log"
 
 	// "time"
@@ -53,33 +57,43 @@ func main() {
 		}(s)
 	}
 
-	data := bytes.NewReader([]byte("I am the content of a file."))
+	fileBytes := []byte("I am the content of a file.")
+	fileHashBytes := sha256.Sum256(fileBytes)
+	fileHash := hex.EncodeToString(fileHashBytes[:])
+	_ = fileHash
+
+	data := bytes.NewReader(fileBytes)
 	_, err := s1.StoreFile(data)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// noFileBytes := sha256.Sum256([]byte("File we don't have"))
-	// noFileHash := hex.EncodeToString(noFileBytes[:])
-	// _ = noFileHash
+	_, err = s2.GetFile(fileHash)
+	if err != nil {
+		log.Fatal("Could not get file")
+	}
 
-	// fileBytes := sha256.Sum256([]byte("I am the content of a file."))
-	// fileHash := hex.EncodeToString(fileBytes[:])
-	// _ = fileHash
+	noFileHashBytes := sha256.Sum256([]byte("File we don't have"))
+	noFileHash := hex.EncodeToString(noFileHashBytes[:])
+	_ = noFileHash
 
-	// r, err := s2.GetFile(noFileHash)
-	// if err != nil {
-	// 	log.Fatal("Could not get file")
-	// }
+	r, err := s2.GetFile(noFileHash)
+	if err != nil {
+		log.Fatal("Could not get file")
+	}
 
-	// gotFileBytes, err := io.ReadAll(r)
-	// if err != nil {
-	// 	log.Fatal("failed to read all gotFileBytes.")
-	// }
+	gotFileBytes, err := io.ReadAll(r)
+	if err != nil {
+		log.Fatal("failed to read all gotFileBytes.")
+	}
 
-	// log.Printf("Got file with content: %s", string(gotFileBytes))
+	log.Printf("Got file with content: %s", string(gotFileBytes))
+
+	cipher.NewCTR()
 
 	select {}
+
+	////
 
 	// tcpOpts := p2p.TCPTransportOpts{
 	// 	ListenAddress:      ":3010",

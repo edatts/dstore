@@ -28,7 +28,7 @@ func (d DefaultDecoder) Decode(r io.Reader, msg *Message) error {
 		return err
 	}
 
-	if firstByte[0] == TypeStream {
+	if firstByte[0] == StartStream {
 		msg.IncomingStream = true
 		return nil
 	}

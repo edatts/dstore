@@ -3,8 +3,8 @@ package p2p
 import "net"
 
 const (
-	TypeMessage = 0x0
-	TypeStream  = 0x1
+	StartMessage = 0x0
+	StartStream  = 0x1
 )
 
 // A message contains arbitrary data that is sent over

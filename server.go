@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"io"
 	"log"
 	"net"
+
+	// "reflect"
 	"sync"
 
 	"github.com/edatts/dstore/p2p"
@@ -97,7 +100,7 @@ func (s *Server) StartMessageLoop() {
 			// 4. We free the peers read loop using the wg.
 
 			if err := s.handleMessage(&msg); err != nil {
-				log.Printf("Failed to process message: %s\n", err)
+				log.Printf("(%s): Failed to process message: %s\n", s.Transport.LAddr(), err)
 			}
 
 			// log.Println("Message handled...")
@@ -132,7 +135,7 @@ func (s *Server) BroadcastData(r io.ReadCloser) error {
 
 	mw := io.MultiWriter(peers...)
 
-	_, err := io.Copy(mw, bytes.NewReader([]byte{0x1}))
+	_, err := io.Copy(mw, bytes.NewReader([]byte{p2p.StartStream}))
 	if err != nil {
 		return fmt.Errorf("failed to copy data to peers: %w", err)
 	}
@@ -151,7 +154,7 @@ func (s *Server) BroadcastData(r io.ReadCloser) error {
 
 func (s *Server) BroadcastMessage(m *p2p.Message) {
 	for _, peer := range s.peers.Values() {
-		if err := peer.Send([]byte{p2p.TypeMessage}); err != nil {
+		if err := peer.Send([]byte{p2p.StartMessage}); err != nil {
 			log.Printf("Failed sending message byte to peer (%s): %s", peer.RemoteAddr(), err)
 		}
 		if err := peer.Send(m.Payload); err != nil {
@@ -190,6 +193,9 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 		return fmt.Errorf("failed to decode payload: %w", err)
 	}
 
+	// log.Printf("Payload Data: %v", payload.Data)
+	// log.Printf("Payload Data Type: %v", reflect.TypeOf(payload.Data))
+
 	switch payload.Type {
 	case PayloadType_Notify_NewFile:
 		peer, ok := s.peers.Get(msg.From)
@@ -198,10 +204,11 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 		}
 
 		// Get file hash and metadata
-		data, ok := payload.Data.(PayloadData_Notify_NewFile)
-		if !ok {
-			return fmt.Errorf("invalid payload, could not type assert payload data")
-		}
+		data := payload.Data
+		// data, err := payload.GetData()
+		// if err != nil {
+		// 	return fmt.Errorf("invalid payload, could not type assert payload data")
+		// }
 
 		fileHash := data.FileHash
 
@@ -271,34 +278,66 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 		// A file has been requested by a peer. For now a peer will only request
 		// a file if we have notified them that we have it so we don't need to
 		// check for the file before streaming it to them.
-		data, ok := payload.Data.(PayloadData_Request_GetFile)
-		if !ok {
-			// TODO: If peer sends us an invalid payload, drop them.
-			return fmt.Errorf("invalid payload, could not type assert payload data")
-		}
+		data := payload.Data
+		// data, ok := payload.Data.(PayloadData_Request_GetFile)
+		// if !ok {
+		// 	// TODO: If peer sends us an invalid payload, drop them.
+		// 	return fmt.Errorf("invalid payload, could not type assert payload data")
+		// }
 
 		// Check for file
 		fileHash := data.FileHash
 
+		if !s.HasFile(fileHash) {
+			return fmt.Errorf("file (%s) not found", fileHash)
+		}
+
 		f, err := s.store.Read(fileHash)
 		if err != nil {
-			peer.WaitGroup().Done()
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
+		fileSize, err := s.store.GetFileSize(fileHash)
+		if err != nil {
+			return fmt.Errorf("failed to get file size: %s", err)
+		}
+
 		// Stream the file data to peer.
+		err = peer.Send([]byte{p2p.StartStream})
+		binary.Write(peer, binary.LittleEndian, fileSize)
+		if err != nil {
+			return fmt.Errorf("could not start stream with peer")
+		}
 		_, err = io.Copy(peer, f)
 		if err != nil {
 			// TODO:  If we fail streaming to peer, drop them.
 			return fmt.Errorf("failed streaming file to peer (%s): %w", msg.From, err)
 		}
 
-		peer.WaitGroup().Done()
-
 		err = f.Close()
 		if err != nil {
 			return fmt.Errorf("failed to close reader: %w", err)
 		}
+
+	case PayloadType_Query_HasFile:
+		// Check if we have file. If we do, then we send the file
+		// and the metadata.
+
+		// data, ok := payload.Data.(PayloadData_Query_HasFile)
+		// if !ok {
+		// 	// TODO: If peer sends us an invalid payload, drop them.
+		// 	return fmt.Errorf("invalid payload, could not type assert payload data")
+		// }
+
+		// if !s.HasFile(data.FileHash) {
+
+		// 	payload := Payload{
+		// 		Type: PayloadType_Response_HasFile,
+		// 		Data: PayloadData_Response_HasFile{},
+		// 	}
+
+		// }
+
 	}
 
 	return nil
@@ -308,46 +347,56 @@ func (s *Server) HasFile(fileHash string) bool {
 	return s.store.fileExists(fileHash)
 }
 
-// func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
-// 	if s.HasFile(fileHash) {
-// 		return s.store.Read(fileHash)
-// 	}
+func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
+	if s.HasFile(fileHash) {
+		return s.store.Read(fileHash)
+	}
 
-// 	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
+	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
 
-// 	// Ask all peers if they have the file until we find one that does.
-// 	// payload := Payload{
-// 	// 	Type: PayloadType_Request_GetFile,
-// 	// 	Data: PayloadData_Request_GetFile{
-// 	// 		FileHash: fileHash,
-// 	// 	},
-// 	// }
+	// Ask all peers if they have the file until we find one that does.
+	// payload := Payload{
+	// 	Type: PayloadType_Request_GetFile,
+	// 	Data: PayloadData_Request_GetFile{
+	// 		FileHash: fileHash,
+	// 	},
+	// }
 
-// 	for _, peer := range s.peers.Values() {
-// 		// Send hasFile query to peer
-// 		payload := Payload{
-// 			Type: PayloadType_Query_HasFile,
-// 			Data: PayloadData_Query_HasFile{
-// 				FileHash: fileHash,
-// 			},
-// 		}
+	for _, peer := range s.peers.Values() {
+		buf := new(bytes.Buffer)
+		payload := Payload{
+			Type: PayloadType_Request_GetFile,
+			Data: PayloadData{
+				FileHash: fileHash,
+			},
+		}
 
-// 		// Wait for response
+		gob.NewEncoder(buf).Encode(payload)
 
-// 		// If response is an unexpected, different, message then we
-// 		// need to queue it for processing after we get the expecetd
-// 		// response because the peer might send a message at the same
-// 		// time as us and this creates a race condition.
+		peer.Send([]byte{p2p.StartMessage})
+		peer.Send(buf.Bytes())
 
-// 	}
+		var fileSize int64
+		err := binary.Read(peer, binary.LittleEndian, &fileSize)
+		if err != nil {
+			return nil, err
+		}
 
-// 	r, err := s.store.Read(fileHash)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to read file: %w", err)
-// 	}
+		fileHash, err := s.store.Write(io.LimitReader(peer, fileSize))
+		if err != nil {
+			return nil, err
+		}
 
-// 	return r, nil
-// }
+		log.Printf("(%s): Retrieved and stored file (%s).", s.Transport.LAddr(), fileHash)
+
+		peer.WaitGroup().Done()
+
+		// s.BroadcastMessage(&p2p.Message{Payload: buf.Bytes()})
+
+	}
+
+	return s.store.Read(fileHash)
+}
 
 // Stores a file and returns the file hash. Gossips the
 // file content to other nodes for replicated storage.
@@ -367,7 +416,7 @@ func (s *Server) StoreFile(r io.Reader) (string, error) {
 	buf := new(bytes.Buffer)
 	payload := Payload{
 		Type: PayloadType_Notify_NewFile,
-		Data: PayloadData_Notify_NewFile{
+		Data: PayloadData{
 			FileHash: fileHash,
 			Metadata: Metadata{
 				FileSize: fileSize,
