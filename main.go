@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -88,8 +87,6 @@ func main() {
 	}
 
 	log.Printf("Got file with content: %s", string(gotFileBytes))
-
-	cipher.NewCTR()
 
 	select {}
 
