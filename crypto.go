@@ -19,6 +19,34 @@ func NewKey() ([]byte, error) {
 	return buf, nil
 }
 
+// When deriving an AES key from a password we can provide a salt
+// to recover a key that we have used before. Alternatively, we
+// can provide a nil byte slice when we are deriving a key for
+// the first time, the salt is randomly generated and returned
+// with the derived key.
+func DeriveKeyFromPass(password string, salt []byte) ([]byte, []byte, error) {
+	var (
+		N      int = 1048576
+		r      int = 8
+		p      int = 1
+		keyLen int = 32
+	)
+
+	if salt == nil {
+		salt = make([]byte, 32)
+		if _, err := rand.Read(salt); err != nil {
+			return nil, nil, fmt.Errorf("failed to generate salt: %w", err)
+		}
+	}
+
+	key, err := scrypt.Key([]byte(password), salt, N, r, p, keyLen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to derive key from password: %w", err)
+	}
+
+	return key, salt, nil
+}
+
 func encryptStream(dst io.Writer, src io.Reader, key []byte, salt []byte) (int, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -89,52 +117,49 @@ func copyCTR(dst io.Writer, src io.Reader, stream cipher.Stream) (int, error) {
 	return nBytes, nil
 }
 
-func Encrypt(dst io.Writer, src io.Reader, key []byte) {
+func Encrypt(dst io.Writer, src io.Reader, key []byte) (int, error) {
+	// When encrypting without a password we will provide a random
+	// salt that will be unused, it is only there to maintain
+	// consistent structure of bytes in each file.
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return 0, fmt.Errorf("failed to generate salt: %w", err)
+	}
 
+	return encryptStream(dst, src, key, salt)
+}
+
+func Decrypt(dst io.Writer, src io.Reader, key []byte) (int, error) {
+	// We don't need the salt for decryption here, so we will
+	// just read it then discard it.
+
+	// Read salt from file
+	salt := make([]byte, 32)
+	if _, err := src.Read(salt); err != nil {
+		return 0, fmt.Errorf("failed to read salt from source: %w", err)
+	}
+
+	return decryptStream(dst, src, key)
 }
 
 func EncryptWithPassword(dst io.Writer, src io.Reader, password string) (int, error) {
-	var (
-		salt          []byte = make([]byte, 32)
-		N             int    = 1048576
-		r             int    = 8
-		p             int    = 1
-		keyLen        int    = 32
-		passwordBytes []byte = []byte(password)
-	)
-
-	if _, err := rand.Read(salt); err != nil {
-		return 0, fmt.Errorf("failed generating salt: %w", err)
-	}
-
-	// Derive key from password
-	key, err := scrypt.Key(passwordBytes, salt, N, r, p, keyLen)
+	key, salt, err := DeriveKeyFromPass(password, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to derive key from password: %w", err)
+		return 0, fmt.Errorf("failed to derive key: %w", err)
 	}
 
 	return encryptStream(dst, src, key, salt)
 }
 
 func DecryptWithPassword(dst io.Writer, src io.Reader, password string) (int, error) {
-	var (
-		salt          []byte = make([]byte, 32)
-		N             int    = 1048576
-		r             int    = 8
-		p             int    = 1
-		keyLen        int    = 32
-		passwordBytes []byte = []byte(password)
-	)
-
-	// Read salt from file
+	salt := make([]byte, 32)
 	if _, err := src.Read(salt); err != nil {
 		return 0, fmt.Errorf("failed to read salt from source: %w", err)
 	}
 
-	// Derive key from password
-	key, err := scrypt.Key(passwordBytes, salt, N, r, p, keyLen)
+	key, _, err := DeriveKeyFromPass(password, salt)
 	if err != nil {
-		return 0, fmt.Errorf("failed to derive key from password: %w", err)
+		return 0, fmt.Errorf("failed to derive key: %w", err)
 	}
 
 	return decryptStream(dst, src, key)
