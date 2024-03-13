@@ -247,7 +247,8 @@ func (s *Store) Delete(fileHash string) error {
 
 	// Check for file
 	if exists := s.fileExists(fileHash); !exists {
-		return fmt.Errorf("file not found")
+		return nil
+		// return fmt.Errorf("file not found")
 	}
 
 	// Get file path

@@ -16,8 +16,8 @@ import (
 )
 
 func init() {
-	gob.Register(PayloadData_Notify_NewFile{})
-	gob.Register(PayloadData_Request_GetFile{})
+	// gob.Register(PayloadData_Notify_NewFile{})
+	// gob.Register(PayloadData_Request_GetFile{})
 }
 
 type ServerOpts struct {
@@ -92,18 +92,10 @@ func (s *Server) StartMessageLoop() {
 		select {
 		case msg := <-s.Transport.MsgChan():
 			log.Printf("(%s): Received message from: %s", s.Transport.LAddr(), msg.From)
-			// Here we need to process each messaged, workflow for that is
-			// as follows:
-			// 1. Peer will halt it's read loop with a wg.
-			// 2. We handle the message.
-			// 3. Carry out work associated with Payload.
-			// 4. We free the peers read loop using the wg.
 
 			if err := s.handleMessage(&msg); err != nil {
 				log.Printf("(%s): Failed to process message: %s\n", s.Transport.LAddr(), err)
 			}
-
-			// log.Println("Message handled...")
 
 			p, ok := s.peers.Get(msg.From)
 			if !ok {
@@ -111,11 +103,7 @@ func (s *Server) StartMessageLoop() {
 				continue
 			}
 
-			// log.Println("Resuming peer read loop...")
-
 			_ = p
-			// Only call this when the exchange is complete.
-			// p.WaitGroup().Done()
 
 		case <-s.quitCh:
 			log.Println("Message received on quit channel, stopping server.")
@@ -133,6 +121,8 @@ func (s *Server) BroadcastData(r io.ReadCloser) error {
 		peers = append(peers, peer)
 	}
 
+	// We shouldn't really use a multiwriter because if we fail
+	// to write to one peer then the stream will end to all peers.
 	mw := io.MultiWriter(peers...)
 
 	_, err := io.Copy(mw, bytes.NewReader([]byte{p2p.StartStream}))
@@ -224,35 +214,6 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 			return nil
 		}
 
-		// // Otherwise, request the file from the peer that notified us.
-		// encoded := new(bytes.Buffer)
-		// payload := Payload{
-		// 	Type: PayloadType_Request_GetFile,
-		// 	Data: PayloadData_Request_GetFile{
-		// 		FileHash: fileHash,
-		// 	},
-		// }
-
-		// err := gob.NewEncoder(encoded).Encode(payload)
-		// if err != nil {
-		// 	return err
-		// }
-
-		// err = peer.Send(encoded.Bytes())
-		// if err != nil {
-		// 	return err
-		// }
-
-		// s.pendingFiles.Add(fileHash)
-		// defer s.pendingFiles.Remove(fileHash)
-
-		// // Now write the peers response to disk.
-		// hash, err := s.StoreFile(io.LimitReader(peer, data.Metadata.FileSize))
-		// if err != nil {
-		// 	// We might need to clean up tmp/ here as well.
-		// 	return fmt.Errorf("failed to store file: %w", err)
-		// }
-
 		s.pendingFiles.Add(fileHash)
 		defer s.pendingFiles.Remove(fileHash)
 
@@ -279,11 +240,6 @@ func (s *Server) handleMessage(msg *p2p.Message) error {
 		// a file if we have notified them that we have it so we don't need to
 		// check for the file before streaming it to them.
 		data := payload.Data
-		// data, ok := payload.Data.(PayloadData_Request_GetFile)
-		// if !ok {
-		// 	// TODO: If peer sends us an invalid payload, drop them.
-		// 	return fmt.Errorf("invalid payload, could not type assert payload data")
-		// }
 
 		// Check for file
 		fileHash := data.FileHash
@@ -354,14 +310,6 @@ func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
 
 	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
 
-	// Ask all peers if they have the file until we find one that does.
-	// payload := Payload{
-	// 	Type: PayloadType_Request_GetFile,
-	// 	Data: PayloadData_Request_GetFile{
-	// 		FileHash: fileHash,
-	// 	},
-	// }
-
 	for _, peer := range s.peers.Values() {
 		buf := new(bytes.Buffer)
 		payload := Payload{
@@ -390,8 +338,6 @@ func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
 		log.Printf("(%s): Retrieved and stored file (%s).", s.Transport.LAddr(), fileHash)
 
 		peer.WaitGroup().Done()
-
-		// s.BroadcastMessage(&p2p.Message{Payload: buf.Bytes()})
 
 	}
 
@@ -447,20 +393,53 @@ func (s *Server) StoreFile(r io.Reader) (string, error) {
 
 	f.Close()
 
-	// Notify peers of new file.
-	// if err := s.BroadcastMessage(msg); err != nil {
-	// 	return hash, fmt.Errorf("error broadcasting file to network: %w", err)
-	// }
-
-	// For each peer we should probably wait for a response so that
-	// we know which peers already have the file and which peers need
-	// to have the file streamed to them.
-
-	// if err := s.BroadcastData(buf.Bytes()); err != nil {
-	// 	return "", fmt.Errorf("error broadcasting file to network: %w", err)
-	// }
-
 	return fileHash, nil
+}
+
+// Deletes file locally.
+func (s *Server) DeleteFile(fileHash string) error {
+	if !s.HasFile(fileHash) {
+		return nil
+	}
+
+	if err := s.store.Delete(fileHash); err != nil {
+		return fmt.Errorf("error deleting file: %w", err)
+	}
+
+	return nil
+}
+
+// Deletes file locally and signals to peers that they
+// can delete the file as well.
+func (s *Server) PurgeFile(fileHash string) error {
+
+	if err := s.DeleteFile(fileHash); err != nil {
+		return fmt.Errorf("failed to delete file (%s): %w", fileHash, err)
+	}
+
+	// Notify peers to delete file
+	buf := new(bytes.Buffer)
+	payload := Payload{
+		Type: PayloadType_Request_DeleteFile,
+		Data: PayloadData{
+			FileHash: fileHash,
+		},
+	}
+	if err := gob.NewEncoder(buf).Encode(payload); err != nil {
+		return fmt.Errorf("failed to encode deleteFile payload: %w", err)
+	}
+
+	msg := p2p.Message{
+		Payload: buf.Bytes(),
+	}
+
+	s.BroadcastMessage(&msg)
+
+	// We could mark the file as purge pending and we could
+	// periodically check to see if the purge is complete. This
+	// would need to be done asynchronously.
+
+	return nil
 }
 
 func (s *Server) OnPeer(peer p2p.Peer) error {
@@ -512,26 +491,6 @@ func (s *set[T]) Has(t T) bool {
 	return true
 }
 
-type syncMap[K comparable, V any] struct {
-	m map[K]V
-	sync.RWMutex
-}
-
-func (s *syncMap[K, V]) Set(k K, v V) {
-	s.Lock()
-	defer s.Unlock()
-	s.m[k] = v
-	return
-}
-
-func (s *syncMap[K, V]) Get(k K) (V, bool) {
-	s.RLock()
-	defer s.RUnlock()
-
-	v, ok := s.m[k]
-	return v, ok
-}
-
 type peerMap struct {
 	m map[net.Addr]p2p.Peer
 	sync.RWMutex
@@ -569,13 +528,3 @@ func (p *peerMap) Values() []p2p.Peer {
 
 	return values
 }
-
-// // A node will communicate with other nodes to share stored data.
-// // It will also expose an API for interacting with the storage system.
-// type node struct {
-// 	Peers peerMap
-// }
-
-// func NewNode() *node {
-// 	return &node{}
-// }

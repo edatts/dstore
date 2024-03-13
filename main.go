@@ -78,15 +78,39 @@ func main() {
 
 	r, err := s2.GetFile(noFileHash)
 	if err != nil {
-		log.Fatal("Could not get file")
+		log.Fatalf("Could not get file: %s", err)
 	}
 
 	gotFileBytes, err := io.ReadAll(r)
 	if err != nil {
-		log.Fatal("failed to read all gotFileBytes.")
+		log.Fatalf("failed to read all gotFileBytes: %s", err)
 	}
 
 	log.Printf("Got file with content: %s", string(gotFileBytes))
+
+	// Delete file
+	fileWeHaveBytes := []byte("I am the content of a file.")
+	fileHashBytes = sha256.Sum256(fileWeHaveBytes)
+	fileHash = hex.EncodeToString(fileHashBytes[:])
+
+	if err := s2.DeleteFile(fileHash); err != nil {
+		log.Fatalf("failed to delete file: %s", err)
+	}
+
+	if !s2.HasFile(fileHash) {
+		log.Printf("File successfully deleted\n")
+	}
+
+	// Purge file (should still work after deleting locally)
+	if err := s2.PurgeFile(fileHash); err != nil {
+		log.Fatalf("Error purging file: %s", err)
+	}
+
+	for _, s := range []*Server{b1, b2, s1, s2, s3} {
+		if s.HasFile(fileHash) {
+			log.Fatalf("failed to purge file from peer (%s)", s.Transport.LAddr())
+		}
+	}
 
 	select {}
 
