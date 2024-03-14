@@ -29,7 +29,9 @@ const (
 	packetType_EndStream
 )
 
-type rawPacketHeader [7]byte
+const rawHeaderSize = 7
+
+type rawPacketHeader [rawHeaderSize]byte
 
 func (p rawPacketHeader) packetType() byte {
 	return p[0]
@@ -49,8 +51,8 @@ type packetHeader struct {
 	streamId      uint32
 }
 
-func (p *packetHeader) Marshall() [7]byte {
-	rawHeader := [7]byte{p.packetType}
+func (p *packetHeader) Marshall() [rawHeaderSize]byte {
+	rawHeader := [rawHeaderSize]byte{p.packetType}
 	binary.LittleEndian.PutUint16(rawHeader[1:], p.payloadLength)
 	binary.LittleEndian.PutUint32(rawHeader[3:], p.streamId)
 	return rawHeader
@@ -66,12 +68,17 @@ func (p rawPacketHeader) Unmarshall() *packetHeader {
 
 type packetPayload []byte
 
+type packet struct {
+	header  packetHeader
+	payload packetPayload
+}
+
 // Each Stream will be multiplexed through an MConn.
 //
 // Stream should implement net.Conn
 type Stream struct {
-	id   uint32
-	conn *MConn
+	id    uint32
+	mconn *MConn
 
 	// Buffer containing packet messages, needs lock
 	readBuffer [][]byte
@@ -137,12 +144,31 @@ func (s *Stream) Write(b []byte) (int, error) {
 	}
 
 	// Write packet message to conn
+	var n int
 	data := b
 	for len(data) > 0 {
-		pMsg := &packetMessage{}
+		size := len(data)
+		if size > int(s.mconn.packetPayloadSize) {
+			size = int(s.mconn.packetPayloadSize)
+		}
+		p := &packet{
+			header: packetHeader{
+				packetType:    packetType_StreamData,
+				streamId:      s.id,
+				payloadLength: uint16(size),
+			},
+			payload: data[:size],
+		}
+
+		data = data[size:]
+
+		// We need to use another func and chans to track the
+		// bytes written and any errors that may occur.
+		s.mconn.toWriteCh <- p
 
 	}
 
+	return n, nil
 }
 
 func (s *Stream) finished() {
@@ -160,12 +186,55 @@ type MConn struct {
 	// The underlying net.Conn
 	conn io.ReadWriteCloser
 
-	msgReadBuffer  []byte
-	msgWritebuffer []byte
+	closedCh chan struct{}
 
-	streams map[uint32]Stream
+	streams map[uint32]*Stream
+	mu      sync.RWMutex
+
+	nextStreamId uint32
+
+	packetPayloadSize uint16
+
+	toWriteCh chan *packet
 }
 
-func (c *MConn) Send() {
+func (m *MConn) newStream() *Stream {
+
+	return nil
+}
+
+func (m *MConn) StartStream() (*Stream, error) {
+
+	return nil, nil
+}
+
+func (m *MConn) writeLoop() {
+	// Need to add some error handling with chans
+	var n int
+	var err error
+
+	var buf = make([]byte, m.packetPayloadSize+rawHeaderSize)
+	for {
+		select {
+		case <-m.closedCh:
+			return
+		case packet := <-m.toWriteCh:
+			buf[0] = packet.header.packetType
+			binary.LittleEndian.PutUint16(buf[1:], packet.header.payloadLength)
+			binary.LittleEndian.PutUint32(buf[3:], packet.header.streamId)
+			copy(buf[rawHeaderSize:], packet.payload)
+			n, err = m.conn.Write(buf[:rawHeaderSize+len(packet.payload)])
+		}
+
+		n -= rawHeaderSize
+		_ = err
+
+		// TODO: Need to return n and err through chans
+
+	}
+
+}
+
+func (c *MConn) readLoop() {
 
 }
