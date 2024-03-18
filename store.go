@@ -10,13 +10,16 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
-	blockSize             int    = 8
-	maxFileReadBytes      int    = 200 * 1024 * 1024 // 200 MiB
-	bufferedReaderBufSize int    = 16 * 1024         // 16 KiB
-	defaultStoragePath    string = "storage"
+	blockSize             int = 8
+	maxFileReadBytes      int = 200 * 1024 * 1024 // 200 MiB
+	bufferedReaderBufSize int = 16 * 1024         // 16 KiB
+	// TODO: Add dstore home in config
+	defaultStoragePath string = "storage"
 )
 
 type Metadata struct {
@@ -412,4 +415,24 @@ func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 	}
 
 	return br, nil
+}
+
+func (s *Store) GetAvailableDiskBytes() (int, error) {
+
+	var stat unix.Statfs_t
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	log.Printf("working dir: %s", wd+"/"+defaultStoragePath)
+
+	if err := unix.Statfs(wd, &stat); err != nil {
+		return 0, fmt.Errorf("failed to stat file system: %w", err)
+	}
+
+	numBytes := int64(stat.Bavail) * stat.Bsize
+
+	return int(numBytes), nil
 }

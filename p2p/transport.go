@@ -1,14 +1,15 @@
 package p2p
 
 import (
-	"net"
+	// "net"
 	"sync"
 )
 
 // Peer is any legitimate node on the network that we can connect to.
 type Peer interface {
-	net.Conn
-	Send([]byte) error
+	// net.Conn
+	MConn
+	// Send([]byte) error
 	WaitGroup() *sync.WaitGroup
 }
 

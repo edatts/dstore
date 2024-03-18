@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log"
+	"time"
 
 	// "time"
 
@@ -66,6 +67,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	time.Sleep(time.Second * 3)
 
 	_, err = s2.GetFile(fileHash)
 	if err != nil {

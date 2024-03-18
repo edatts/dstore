@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io/fs"
+	"log"
 	"os"
 	"testing"
 )
@@ -236,4 +237,18 @@ func TestStore(t *testing.T) {
 	if err = store.Clear(); err != nil {
 		t.Errorf("error clearing store: %s", err)
 	}
+}
+
+func TestGetAvailableDiskBytes(t *testing.T) {
+
+	opts := StoreOpts{}
+	s := NewStore(opts)
+
+	n, err := s.GetAvailableDiskBytes()
+	if err != nil {
+		t.Errorf("error getting free disk space: %s", err)
+	}
+
+	log.Printf("Num free bytes: %d", n)
+
 }

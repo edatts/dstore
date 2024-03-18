@@ -3,7 +3,6 @@ package p2p
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"sync"
@@ -14,31 +13,36 @@ type TCPPeer struct {
 	// Embedding the underlying connection for the peer allows
 	// us to make use of io.Reader and io.Writer directly on
 	// the peer.
-	net.Conn
+	// net.Conn
+
+	// Embedding the MConn allows us to call it's methods
+	// directly on the peer.
+	MConn
 
 	isOutboud bool
 
 	wg *sync.WaitGroup
 }
 
-func NewTcpPeer(conn net.Conn, isOutbound bool) *TCPPeer {
+func NewTcpPeer(conn *TCPMConn, isOutbound bool) *TCPPeer {
+	// func NewTcpPeer(conn *MConn, isOutbound bool) *TCPPeer {
 	return &TCPPeer{
-		Conn:      conn,
+		MConn:     conn,
 		isOutboud: isOutbound,
 		wg:        &sync.WaitGroup{},
 	}
 }
 
-func (t *TCPPeer) Send(b []byte) error {
-	n, err := t.Conn.Write(b)
-	if err != nil {
-		return fmt.Errorf("error sending to peer (%s): %w", t.RemoteAddr(), err)
-	}
+// func (t *TCPPeer) Send(b []byte) error {
+// 	n, err := t.Write(b)
+// 	if err != nil {
+// 		return fmt.Errorf("error sending to peer (%s): %w", t.RemoteAddr(), err)
+// 	}
 
-	log.Printf("Wrote %d bytes.", n)
+// 	log.Printf("Wrote %d bytes.", n)
 
-	return nil
-}
+// 	return nil
+// }
 
 func (t *TCPPeer) WaitGroup() *sync.WaitGroup {
 	return t.wg
@@ -119,15 +123,21 @@ func (t *TCPTransport) MsgChan() <-chan Message {
 }
 
 func (t *TCPTransport) handleConn(conn net.Conn, isOutbound bool) {
-	peer := NewTcpPeer(conn, isOutbound)
+	// peer := NewTcpPeer(conn, isOutbound)
 
-	err := t.HandshakeFunc(peer)
+	err := t.HandshakeFunc(conn)
 	if err != nil {
 		log.Printf("Handshake failed: %s\n", err)
 		// log.Printf("Dropping peer for error: %s\n", err)
-		peer.Close()
+		// peer.Close()
+		conn.Close()
 		return
 	}
+
+	// Upgrade conn to MConn
+	mConn := t.upgradeToMConn(conn, isOutbound)
+
+	peer := NewTcpPeer(mConn, isOutbound)
 
 	err = t.OnPeer(peer)
 	if err != nil {
@@ -137,36 +147,51 @@ func (t *TCPTransport) handleConn(conn net.Conn, isOutbound bool) {
 	}
 
 	// Read loop
-	for {
-		msg := Message{}
-		msg.From = conn.RemoteAddr()
-		err := t.Decoder.Decode(conn, &msg)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-				log.Printf("Dropping peer for error: %s\n", err)
-				conn.Close()
-				return
-			}
-			log.Printf("Error reading message: %s\n", err)
-			// Should we drop peer after n message errors?
-		}
 
-		if msg.IncomingStream {
-			peer.wg.Add(1)
-			log.Printf("(%s): Pausing read loop, waiting for stream to finish.\n", t.LAddr())
-			peer.wg.Wait()
-			log.Printf("(%s): Stream finished, resuming read loop.\n", t.LAddr())
-			continue
+	for payload := range mConn.ConsumeMessages() {
+		msg := Message{
+			From:    peer.RemoteAddr(),
+			Payload: payload,
 		}
 
 		t.msgCh <- msg
 
-		// peer.wg.Add(1)
-		// log.Printf("Paused read loop, waiting for message to be processed.\n")
-		// peer.wg.Wait()
-		// log.Printf("Resumed read loop.")
-
 	}
+
+	// for {
+	// 	msg := Message{}
+	// 	msg.From = conn.RemoteAddr()
+	// 	err := t.Decoder.Decode(conn, &msg)
+	// 	if err != nil {
+	// 		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+	// 			log.Printf("Dropping peer for error: %s\n", err)
+	// 			conn.Close()
+	// 			return
+	// 		}
+	// 		log.Printf("Error reading message: %s\n", err)
+	// 		// Should we drop peer after n message errors?
+	// 	}
+
+	// 	if msg.IncomingStream {
+	// 		peer.wg.Add(1)
+	// 		log.Printf("(%s): Pausing read loop, waiting for stream to finish.\n", t.LAddr())
+	// 		peer.wg.Wait()
+	// 		log.Printf("(%s): Stream finished, resuming read loop.\n", t.LAddr())
+	// 		continue
+	// 	}
+
+	// 	t.msgCh <- msg
+
+	// 	// peer.wg.Add(1)
+	// 	// log.Printf("Paused read loop, waiting for message to be processed.\n")
+	// 	// peer.wg.Wait()
+	// 	// log.Printf("Resumed read loop.")
+
+	// }
+}
+
+func (t *TCPTransport) upgradeToMConn(c net.Conn, isOutbound bool) *TCPMConn {
+	return NewTCPMConn(c, isOutbound)
 }
 
 func (t *TCPTransport) LAddr() string {
