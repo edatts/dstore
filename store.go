@@ -293,8 +293,7 @@ func (s *Store) getDeletePaths(fullPath string) []string {
 }
 
 // Returns true if the corresponding file exists, false if the
-// file does not exist, and false and an error if there was
-// some other error.
+// file does not exist.
 func (s *Store) fileExists(fileHash string) bool {
 
 	// Get file path

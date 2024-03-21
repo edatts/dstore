@@ -54,34 +54,33 @@ func MakePeers() (outMConn, inMConn *TCPMConn, err error) {
 	return outMConn, inMConn, nil
 }
 
-func OpenNChannels(outMConn, inMConn *TCPMConn, n int) (outChannels, inChannels []*Channel, err error) {
+func OpenNStreams(outMConn, inMConn *TCPMConn, n int) (outStreams, inStreams []*Stream, err error) {
 
 	// outStreams, inStreams = []*Stream{}, []*Stream{}
 
 	for i := 0; i < n; i++ {
-		stream, err := inMConn.OpenChannel()
+		stream, err := inMConn.StartStream()
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to start new stream: %w", err)
 		}
 
-		inChannels = append(inChannels, stream)
+		inStreams = append(inStreams, stream)
 
 		// Allow time for streams to open
 		time.Sleep(time.Millisecond * 10)
 
-		s, ok := outMConn.channels[stream.id]
+		s, ok := outMConn.streams[stream.id]
 		if !ok {
 			return nil, nil, fmt.Errorf("could not find stream with id (%d)", stream.id)
 		}
 
-		outChannels = append(outChannels, s)
+		outStreams = append(outStreams, s)
 	}
 
-	return outChannels, inChannels, nil
+	return outStreams, inStreams, nil
 }
 
-func StreamNBytes(outChannels, inChannels []*Channel, n int) (int, error) {
-	finishedReads := make(chan *bytes.Buffer, n)
+func StreamNBytes(outStreams, inStreams []*Stream, n int) (int, error) {
 	done := make(chan struct{})
 	numReadErrs := 0
 	numWriteErrs := 0
@@ -89,22 +88,20 @@ func StreamNBytes(outChannels, inChannels []*Channel, n int) (int, error) {
 	// Start reading
 	go func() {
 		wg := &sync.WaitGroup{}
-		for _, channel := range inChannels {
+		for _, stream := range inStreams {
 			wg.Add(1)
-			go func(c *Channel, wg *sync.WaitGroup) {
+			go func(s *Stream, wg *sync.WaitGroup) {
 				rBuf := new(bytes.Buffer)
-				if _, err := rBuf.ReadFrom(c); err != nil {
+				if _, err := rBuf.ReadFrom(s); err != nil {
 					numReadErrs += 1
-					log.Printf("error reading from channel (%d): %s", c.id, err)
+					log.Printf("error reading from stream (%d): %s", s.id, err)
 				}
-				// log.Printf("rBuf length: %d", rBuf.Len())
-				finishedReads <- rBuf
+				log.Printf("rBuf length: %d", rBuf.Len())
 				wg.Done()
-			}(channel, wg)
+			}(stream, wg)
 		}
 		wg.Wait()
 		done <- struct{}{}
-		close(finishedReads)
 	}()
 
 	// Wait a bit for reads to start
@@ -118,8 +115,8 @@ func StreamNBytes(outChannels, inChannels []*Channel, n int) (int, error) {
 
 	var nWritten int
 
-	for _, s := range outChannels {
-		go func(s *Channel) {
+	for _, s := range outStreams {
+		go func(s *Stream) {
 			buf := bytes.NewBuffer(b)
 			written, err := io.Copy(s, buf)
 			if err != nil {
@@ -144,33 +141,27 @@ func StreamNBytes(outChannels, inChannels []*Channel, n int) (int, error) {
 		return nWritten, fmt.Errorf("one or more write errors occured")
 	}
 
-	for rBuf := range finishedReads {
-		if string(b) != rBuf.String() {
-			return nWritten, fmt.Errorf("Read buffer different from written buffer...")
-		}
-	}
-
 	return nWritten, nil
 }
 
-func StreamNBytesWithMultiWriter(outChannels, inChannels []*Channel, n int) (int, error) {
+func StreamNBytesWithMultiWriter(outStreams, inStreams []*Stream, n int) (int, error) {
 	done := make(chan struct{})
 	numReadErrs := 0
 
 	// Start reading
 	go func() {
 		wg := &sync.WaitGroup{}
-		for _, channel := range inChannels {
+		for _, stream := range inStreams {
 			wg.Add(1)
-			go func(c *Channel, wg *sync.WaitGroup) {
+			go func(s *Stream, wg *sync.WaitGroup) {
 				rBuf := new(bytes.Buffer)
-				if _, err := rBuf.ReadFrom(c); err != nil {
+				if _, err := rBuf.ReadFrom(s); err != nil {
 					numReadErrs += 1
-					log.Printf("error reading from stream (%d): %s", c.id, err)
+					log.Printf("error reading from stream (%d): %s", s.id, err)
 				}
 				log.Printf("rBuf length: %d", rBuf.Len())
 				wg.Done()
-			}(channel, wg)
+			}(stream, wg)
 		}
 		wg.Wait()
 		done <- struct{}{}
@@ -187,29 +178,29 @@ func StreamNBytesWithMultiWriter(outChannels, inChannels []*Channel, n int) (int
 
 	buf := bytes.NewBuffer(b)
 	mws := []io.Writer{}
-	for _, s := range outChannels {
+	for _, s := range outStreams {
 		mws = append(mws, s)
 	}
 	mw := io.MultiWriter(mws...)
 	written, err := io.Copy(mw, buf)
 	if err != nil {
-		return int(written) * len(outChannels), fmt.Errorf("failed copying data: %w", err)
+		return int(written) * len(outStreams), fmt.Errorf("failed copying data: %w", err)
 	}
 
-	for _, s := range outChannels {
+	for _, s := range outStreams {
 		err = s.Close()
 		if err != nil {
-			log.Printf("error closing channel: %s", err)
+			log.Printf("error closing stream: %s", err)
 		}
 	}
 
 	<-done
 
 	if numReadErrs >= 1 {
-		return int(written) * len(outChannels), fmt.Errorf("one or more read errors occured")
+		return int(written) * len(outStreams), fmt.Errorf("one or more read errors occured")
 	}
 
-	return int(written) * len(outChannels), nil
+	return int(written) * len(outStreams), nil
 }
 
 func TestStreaming(t *testing.T) {
@@ -220,7 +211,7 @@ func TestStreaming(t *testing.T) {
 	}
 
 	// Test open stream
-	outChannel, err := outMConn.OpenChannel()
+	outStream, err := outMConn.StartStream()
 	if err != nil {
 		t.Errorf("failed to start stream on outMConn: %s", err)
 	}
@@ -231,17 +222,17 @@ func TestStreaming(t *testing.T) {
 	// log.Printf("inStreams: (%d), ouStreams: (%d)", len(inMConn.streams), len(outMConn.streams))
 
 	// Verify that stream exists in both sides of MConn
-	if len(outMConn.channels) == 0 {
+	if len(outMConn.streams) == 0 {
 		t.Errorf("stream not found in outMConn")
 	}
-	if len(inMConn.channels) == 0 {
+	if len(inMConn.streams) == 0 {
 		t.Errorf("stream not found in inMConn")
 	}
 
-	// Verify channelIds are the same
-	inChannel, ok := inMConn.channels[outChannel.id]
+	// Verify streamIds are the same
+	inStream, ok := inMConn.streams[outStream.id]
 	if !ok {
-		t.Errorf("could not find stream with id: %d", outChannel.id)
+		t.Errorf("could not find stream with id: %d", outStream.id)
 	}
 
 	// Start reading
@@ -249,8 +240,7 @@ func TestStreaming(t *testing.T) {
 	readBuf := new(bytes.Buffer)
 	go func() {
 		log.Printf("Attempting to read from inStream")
-		readBuf.ReadFrom(inChannel)
-		log.Printf("Finished reading...")
+		readBuf.ReadFrom(inStream)
 		done <- struct{}{}
 	}()
 
@@ -260,20 +250,18 @@ func TestStreaming(t *testing.T) {
 		t.Errorf("failed to get random bytes: %s", err)
 	}
 	buf := bytes.NewBuffer(b)
-	buf.WriteTo(outChannel)
-	if err := outChannel.Close(); err != nil {
+	buf.WriteTo(outStream)
+	if err := outStream.Close(); err != nil {
 		t.Errorf("error closing stream: %s", err)
 	}
 
 	// Wait for reads
 	<-done
 
-	log.Printf("Done reading.")
-
 	// Ensure streams are cleaned up
-	if len(inMConn.channels) != 0 || len(outMConn.channels) != 0 {
+	if len(inMConn.streams) != 0 || len(outMConn.streams) != 0 {
 		t.Errorf("not all streams cleaned up")
-		log.Printf("inMConn num streams: (%d), outMConn num streams: (%d)", len(inMConn.channels), len(outMConn.channels))
+		log.Printf("inMConn num streams: (%d), outMConn num streams: (%d)", len(inMConn.streams), len(outMConn.streams))
 	}
 
 	if len(b) != readBuf.Len() {
@@ -284,26 +272,26 @@ func TestStreaming(t *testing.T) {
 
 	////// Test multiple concurrent streams //////
 
-	outStreams, inStreams, err := OpenNChannels(inMConn, outMConn, 10)
+	outStreams, inStreams, err := OpenNStreams(inMConn, outMConn, 10)
 	if err != nil {
 		t.Errorf("error opening streams: %s", err)
 	}
 
 	// Check both sides see all streams
-	if len(inMConn.channels) != len(outMConn.channels) {
+	if len(inMConn.streams) != len(outMConn.streams) {
 		t.Error("sides have different number of streams")
-		log.Printf("inStreams: (%d), outStreams: (%d)", len(inMConn.channels), len(outMConn.channels))
+		log.Printf("inStreams: (%d), outStreams: (%d)", len(inMConn.streams), len(outMConn.streams))
 	}
 
-	_, err = StreamNBytes(outStreams, inStreams, 10*1024*1024)
+	_, err = StreamNBytes(outStreams, inStreams, 1*1024*1024)
 	if err != nil {
-		t.Errorf("error streaming bytes: %s", err)
+		t.Errorf("error srteaming bytes: %s", err)
 	}
 
 	// Ensure all streams are cleaned up
-	if len(inMConn.channels) != 0 || len(outMConn.channels) != 0 {
+	if len(inMConn.streams) != 0 || len(outMConn.streams) != 0 {
 		t.Errorf("not all streams cleaned up")
-		log.Printf("inMConn num streams: (%d), outMConn num streams: (%d)", len(inMConn.channels), len(outMConn.channels))
+		log.Printf("inMConn num streams: (%d), outMConn num streams: (%d)", len(inMConn.streams), len(outMConn.streams))
 	}
 
 }
@@ -320,7 +308,7 @@ func BenchmarkMultipleStreams(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 
 		////// Get Streams //////
-		outStreams, inStreams, err := OpenNChannels(outMConn, inMConn, 10)
+		outStreams, inStreams, err := OpenNStreams(outMConn, inMConn, 10)
 		if err != nil {
 			b.Errorf("failed to open streams: %s", err)
 		}
@@ -350,7 +338,7 @@ func BenchmarkMultipleStreams2(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 
 		////// Get Streams //////
-		outStreams, inStreams, err := OpenNChannels(outMConn, inMConn, 10)
+		outStreams, inStreams, err := OpenNStreams(outMConn, inMConn, 10)
 		if err != nil {
 			b.Errorf("failed to open streams: %s", err)
 		}

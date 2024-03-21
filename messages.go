@@ -2,8 +2,8 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"log"
+	"net"
 )
 
 type PayloadType int
@@ -69,7 +69,7 @@ const (
 
 	HasFile
 	GetFile
-	SendFile
+	PutFile
 	DeleteFile
 	PurgeFile
 
@@ -81,84 +81,109 @@ const (
 )
 
 var (
-	ErrFileNotFound = errors.New("file not found")
-	ErrDiskSpace    = errors.New("not enough free disk space")
-	ErrHaveFile     = errors.New("file already stored")
-	ErrFailedDelete = errors.New("failed to delete file")
+	ErrRejected       = errors.New("the peer rejected the request")
+	ErrFileNotFound   = errors.New("file not found")
+	ErrDiskSpace      = errors.New("not enough free disk space")
+	ErrHaveFile       = errors.New("file already stored")
+	ErrFailedDelete   = errors.New("failed to delete file")
+	ErrAlreadyPurging = errors.New("already purging file")
 
 	ErrInternal = errors.New("internal server error")
 )
 
-type RPC struct {
-	Method RPCMethod
-	Sum    isRPCSum
+type RPCRequest struct {
+	Sum isRPCRequest
+}
+
+type RPCResponse struct {
+	Sum isRPCResponse
+}
+
+type isRPCRequest interface {
+	isRPCRequest()
+}
+
+type isRPCResponse interface {
+	isRPCResponse()
+}
+
+type HasFileRequest struct {
+	FileHash string
+}
+
+type HasFileResponse struct {
+	Result bool
 	Err    error
 }
 
-type isRPCSum interface {
-	isRPCSum()
-}
+func (r *HasFileRequest) isRPCRequest()   {}
+func (r *HasFileResponse) isRPCResponse() {}
 
-type HasFileReq struct {
+type GetFileRequest struct {
 	FileHash string
 }
 
-type HasFileRes struct {
-	FileHash string
-	HasFile  bool
-	FileSize int
+type GetFileResponse struct {
+	Result int
+	Err    error
 }
 
-func (r *HasFileReq) isRPCSum() {}
-func (r *HasFileRes) isRPCSum() {}
+func (r *GetFileRequest) isRPCRequest()   {}
+func (r *GetFileResponse) isRPCResponse() {}
 
-type GetFileReq struct {
-	FileHash string
-}
-
-type GetFileRes struct {
+type PutFileRequest struct {
 	FileHash string
 	FileSize int
 }
 
-func (r *GetFileReq) isRPCSum() {}
-func (r *GetFileRes) isRPCSum() {}
-
-type SendFileReq struct {
-	FileHash string
-	FileSize int
+type PutFileResponse struct {
+	Result bool
+	Err    error
 }
 
-type SendFileRes struct {
-	FileHash string
-}
+func (r *PutFileRequest) isRPCRequest()   {}
+func (r *PutFileResponse) isRPCResponse() {}
 
-func (r *SendFileReq) isRPCSum() {}
-func (r *SendFileRes) isRPCSum() {}
-
-type DeleteFileReq struct {
+type DeleteFileRequest struct {
 	FileHash string
 }
 
-type DeleteFileRes struct {
-	FileHash string
-	Success  bool
+type DeleteFileResponse struct {
+	Result bool
+	Err    error
 }
 
-func (r *DeleteFileReq) isRPCSum() {}
-func (r *DeleteFileRes) isRPCSum() {}
+func (r *DeleteFileRequest) isRPCRequest()   {}
+func (r *DeleteFileResponse) isRPCResponse() {}
 
-type PurgeFileReq struct {
-	FileHash string
+type PurgeFileRequest struct {
+	FileHash  string
+	PeerAddrs []net.Addr
 }
 
-type PurgeFileRes struct {
-	FileHash string
-	Success  bool
+type PurgeFileResponse struct {
+	Result PurgeFileResult
+	Err    error
 }
 
-func (r *PurgeFileReq) isRPCSum() {}
-func (r *PurgeFileRes) isRPCSum() {}
+type PurgeFileResult struct {
+	Success   bool
+	PeerAddrs []net.Addr
+	FileHash  string
+}
+
+func (r *PurgeFileRequest) isRPCRequest()   {}
+func (r *PurgeFileResponse) isRPCResponse() {}
+
+type GetDiskSpaceRequest struct{}
+
+type GetDiskSpaceResponse struct {
+	Result int
+	Err    error
+}
+
+func (r *GetDiskSpaceRequest) isRPCRequest()   {}
+func (r *GetDiskSpaceResponse) isRPCResponse() {}
 
 // Another idea is to create a `NetworkOperation` struct that will
 // keep track of operations that involve interacting with peers.

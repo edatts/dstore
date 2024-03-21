@@ -19,7 +19,11 @@ type Message struct {
 	// message types as defined and used by the server.
 	Payload []byte
 
+	// Unique Id that determines which channel the message
+	// was sent through.
+	ChannelId uint32
+
 	// A field that indicates whether the next message will be
 	// part of a stream or not.
-	IncomingStream bool
+	// IncomingStream bool
 }
