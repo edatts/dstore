@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
-
-	// "reflect"
+	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/edatts/dstore/p2p"
 )
@@ -20,18 +21,19 @@ var ErrPeerNotFound = errors.New("peer not found")
 func init() {
 	// gob.Register(PayloadData_Notify_NewFile{})
 	// gob.Register(PayloadData_Request_GetFile{})
-	gob.Register(HasFileRequest{})
-	gob.Register(HasFileResponse{})
-	gob.Register(GetFileRequest{})
-	gob.Register(GetFileResponse{})
-	gob.Register(PutFileRequest{})
-	gob.Register(PutFileResponse{})
-	gob.Register(DeleteFileRequest{})
-	gob.Register(DeleteFileResponse{})
-	gob.Register(PurgeFileRequest{})
-	gob.Register(PurgeFileResponse{})
-	gob.Register(GetDiskSpaceRequest{})
-	gob.Register(GetDiskSpaceResponse{})
+	gob.Register(&HasFileRequest{})
+	gob.Register(&HasFileResponse{})
+	gob.Register(&GetFileRequest{})
+	gob.Register(&GetFileResponse{})
+	gob.Register(&PutFileRequest{})
+	gob.Register(&PutFileResponse{})
+	gob.Register(&DeleteFileRequest{})
+	gob.Register(&DeleteFileResponse{})
+	gob.Register(&PurgeFileRequest{})
+	gob.Register(&PurgeFileResponse{})
+	gob.Register(&GetDiskSpaceRequest{})
+	gob.Register(&GetDiskSpaceResponse{})
+	gob.Register(RPCError{})
 }
 
 type ServerOpts struct {
@@ -43,13 +45,12 @@ type ServerOpts struct {
 type Server struct {
 	ServerOpts
 
-	pendingOperations map[string]NetworkOperation
+	incomingFiles *set[string]
+	purgingFiles  *set[string]
+	peers         *peerMap
+	store         *Store
 
-	requestedFiles *syncMap[string, chan bool]
-	pendingFiles   *set[string]
-	peers          *peerMap
-	store          *Store
-	quitCh         chan struct{}
+	quitCh chan struct{}
 }
 
 func NewServer(opts ServerOpts) *Server {
@@ -58,13 +59,9 @@ func NewServer(opts ServerOpts) *Server {
 	}
 
 	return &Server{
-		ServerOpts: opts,
-
-		requestedFiles: &syncMap[string, chan bool]{
-			m:  map[string]chan bool{},
-			mu: sync.RWMutex{},
-		},
-		pendingFiles: newSet[string](),
+		ServerOpts:    opts,
+		incomingFiles: newSet[string](),
+		purgingFiles:  newSet[string](),
 		peers: &peerMap{
 			m:       make(map[net.Addr]p2p.Peer),
 			RWMutex: sync.RWMutex{},
@@ -92,6 +89,15 @@ func (s *Server) startBootstrap() error {
 	return nil
 }
 
+func (s *Server) Init() error {
+
+	if err := os.MkdirAll(s.StorageRoot, fs.ModePerm); err != nil {
+		return fmt.Errorf("failed to create storage root: %s", err)
+	}
+
+	return nil
+}
+
 func (s *Server) Start() error {
 	if err := s.Transport.ListenAndAccept(); err != nil {
 		return fmt.Errorf("failed to start server: %w", err)
@@ -99,59 +105,17 @@ func (s *Server) Start() error {
 
 	go s.startBootstrap()
 
-	s.StartMessageLoop()
+	// s.StartMessageLoop()
+
+	// log.Printf("Started node...")
+
+	<-s.quitCh
 
 	return nil
 }
 
 func (s *Server) Stop() {
 	s.quitCh <- struct{}{}
-}
-
-func (s *Server) StartMessageLoop() {
-	for {
-		select {
-		case msg := <-s.Transport.MsgChan():
-			log.Printf("(%s): Received message from: %s", s.Transport.LAddr(), msg.From)
-
-			if err := s.handleMessage(&msg); err != nil {
-				log.Printf("(%s): Failed to process message: %s\n", s.Transport.LAddr(), err)
-			}
-
-			p, ok := s.peers.Get(msg.From)
-			if !ok {
-				log.Println("Could not find peer in peers map.")
-				continue
-			}
-
-			_ = p
-
-		case <-s.quitCh:
-			log.Println("Message received on quit channel, stopping server.")
-			s.Transport.Close()
-			// Should clean up peer conns as well.
-			return
-		}
-	}
-}
-
-func (s *Server) channelRequestHandler(c *p2p.Channel) {
-	for {
-		select {
-		case msg := <-c.ConsumeRequests():
-			log.Printf("(%s): Received request from: %s", s.Transport.LAddr(), msg.From)
-
-			if err := s.handleRequest(msg); err != nil {
-				log.Printf("(%s): Failed to process request: %s\n", s.Transport.LAddr(), err)
-			}
-
-		case <-s.quitCh:
-			log.Println("Message received on quit channel, stopping server.")
-			s.Transport.Close()
-			// Should clean up peer conns as well.
-			return
-		}
-	}
 }
 
 func (s *Server) handleRequest(msg *p2p.Message) error {
@@ -162,7 +126,7 @@ func (s *Server) handleRequest(msg *p2p.Message) error {
 		return fmt.Errorf("failed to decode payload: %w", err)
 	}
 
-	log.Printf("Handling request...")
+	// log.Printf("Handling %s message.", reflect.TypeOf(request.Sum))
 
 	switch request.Sum.(type) {
 	case *HasFileRequest:
@@ -182,10 +146,9 @@ func (s *Server) handleRequest(msg *p2p.Message) error {
 			return fmt.Errorf("error handling HasFile request: %w", err)
 		}
 	case *PurgeFileRequest:
-		panic("not implemented yet...")
-		// if err := s.handlePurgeFileRequest(request.Sum.(*PurgeFileRequest), msg.From, msg.ChannelId); err != nil {
-		// 	return fmt.Errorf("error handling HasFile request: %w", err)
-		// }
+		if err := s.handlePurgeFileRequest(request.Sum.(*PurgeFileRequest), msg.From, msg.ChannelId); err != nil {
+			return fmt.Errorf("error handling HasFile request: %w", err)
+		}
 	case *GetDiskSpaceRequest:
 		if err := s.handleGetDiskSpaceRequest(request.Sum.(*GetDiskSpaceRequest), msg.From, msg.ChannelId); err != nil {
 			return fmt.Errorf("error handling HasFile request: %w", err)
@@ -201,7 +164,7 @@ func (s *Server) prepareAndSendResponse(res RPCResponse, addr net.Addr, chId uin
 	buf := new(bytes.Buffer)
 
 	if err := gob.NewEncoder(buf).Encode(res); err != nil {
-		return fmt.Errorf("failed to encode notify payload: %w", err)
+		return fmt.Errorf("failed to encode response payload: %w", err)
 	}
 
 	peer, ok := s.peers.Get(addr)
@@ -211,7 +174,7 @@ func (s *Server) prepareAndSendResponse(res RPCResponse, addr net.Addr, chId uin
 
 	channel, ok := peer.GetChannel(chId)
 	if !ok {
-		return fmt.Errorf("channel (%d) not found.", chId)
+		return fmt.Errorf("channel (%d) not found", chId)
 	}
 
 	if err := channel.SendResponse(buf.Bytes()); err != nil {
@@ -228,7 +191,7 @@ func (s *Server) handleHasFileRequest(req *HasFileRequest, from net.Addr, chId u
 		res = RPCResponse{
 			Sum: &HasFileResponse{
 				Result: false,
-				Err:    nil,
+				Err:    NilErr,
 			},
 		}
 
@@ -238,7 +201,7 @@ func (s *Server) handleHasFileRequest(req *HasFileRequest, from net.Addr, chId u
 	res = RPCResponse{
 		Sum: &HasFileResponse{
 			Result: true,
-			Err:    nil,
+			Err:    NilErr,
 		},
 	}
 
@@ -274,7 +237,7 @@ func (s *Server) handleGetFileRequest(req *GetFileRequest, from net.Addr, chId u
 	res = RPCResponse{
 		Sum: &GetFileResponse{
 			Result: int(fileSize),
-			Err:    nil,
+			Err:    NilErr,
 		},
 	}
 
@@ -300,7 +263,7 @@ func (s *Server) handleGetFileRequest(req *GetFileRequest, from net.Addr, chId u
 
 		channel, ok := peer.GetChannel(chId)
 		if !ok {
-			log.Printf("failed to get channel (%s)", chId)
+			log.Printf("failed to get channel (%d)", chId)
 			return
 		}
 
@@ -352,20 +315,39 @@ func (s *Server) handlePutFileRequest(req *PutFileRequest, from net.Addr, chId u
 		return s.prepareAndSendResponse(res, from, chId)
 	}
 
+	// I think the lock needs to be held for the entirety of the duration
+	// of the .Has() and .Add() calls instead of just during their
+	// individual execution. Otherwise there is still a data race.
+	// This version checks if the file is present and then adds it if
+	// it is not present, the underlying lock is held at all times.
+	if added := s.incomingFiles.AddIfNotHas(req.FileHash); !added {
+		// File already incoming
+		res = RPCResponse{
+			Sum: &PutFileResponse{
+				Result: false,
+				Err:    ErrAlreadyRecv,
+			},
+		}
+
+		return s.prepareAndSendResponse(res, from, chId)
+	}
+
 	res = RPCResponse{
 		Sum: &PutFileResponse{
 			Result: true,
-			Err:    nil,
+			Err:    NilErr,
 		},
 	}
 
 	if err := s.prepareAndSendResponse(res, from, chId); err != nil {
+		s.incomingFiles.Remove(req.FileHash)
 		return fmt.Errorf("failed to send response to (%s): %w", from, err)
 	}
 
 	// If sending successful response we can start receiving the
 	// file from stream.
 	go func() {
+		defer s.incomingFiles.Remove(req.FileHash)
 
 		peer, ok := s.peers.Get(from)
 		if !ok {
@@ -382,15 +364,24 @@ func (s *Server) handlePutFileRequest(req *PutFileRequest, from net.Addr, chId u
 		pr, pw := io.Pipe()
 
 		go func() {
+			defer pw.Close()
 			_, err := io.CopyN(pw, channel, int64(req.FileSize))
 			if err != nil {
 				log.Printf("error: failed copying file from peer")
 			}
 		}()
 
-		fileHash, err := s.store.Write(pr)
+		// This version does not progagate the file to more peers.
+		// fileHash, err := s.store.Write(pr)
+		// if err != nil {
+		// 	log.Printf("error: failed writing to store: %w", err)
+		// }
+
+		// This verison progagates the file to more peers.
+		fileHash, err := s.StoreFile(pr)
 		if err != nil {
-			log.Printf("error: failed writing to store: %w", err)
+			log.Printf("error: failed writing to store: %s", err)
+			return
 		}
 
 		if fileHash != req.FileHash {
@@ -406,7 +397,7 @@ func (s *Server) handleDeleteFileRequest(req *DeleteFileRequest, from net.Addr, 
 	var res = RPCResponse{
 		Sum: &DeleteFileResponse{
 			Result: true,
-			Err:    nil,
+			Err:    NilErr,
 		},
 	}
 
@@ -429,15 +420,50 @@ func (s *Server) handleDeleteFileRequest(req *DeleteFileRequest, from net.Addr, 
 }
 
 func (s *Server) handlePurgeFileRequest(req *PurgeFileRequest, from net.Addr, chId uint32) error {
+	var res = RPCResponse{
+		Sum: &PurgeFileResponse{
+			Result: true,
+			Err:    NilErr,
+		},
+	}
 
-	return nil
+	if !s.purgingFiles.AddIfNotHas(req.FileHash) {
+		// Already purging file
+		return s.prepareAndSendResponse(res, from, chId)
+	}
+	defer s.purgingFiles.Remove(req.FileHash)
+
+	if err := s.DeleteFile(req.FileHash); err != nil {
+		log.Printf("failed deleting file (%s): %s", req.FileHash, err)
+		res = RPCResponse{
+			Sum: &PurgeFileResponse{
+				Result: false,
+				Err:    ErrInternal,
+			},
+		}
+
+		return s.prepareAndSendResponse(res, from, chId)
+	}
+
+	if err := s.NetworkPurgeFile(req.FileHash); err != nil {
+		log.Printf("one or more nodes failed purging file (%s): %s", req.FileHash, err)
+		res = RPCResponse{
+			Sum: &PurgeFileResponse{
+				Result: false,
+				Err:    ErrPurgeFailed,
+			},
+		}
+
+		return s.prepareAndSendResponse(res, from, chId)
+	}
+
+	return s.prepareAndSendResponse(res, from, chId)
 }
 
 func (s *Server) handleGetDiskSpaceRequest(req *GetDiskSpaceRequest, from net.Addr, chId uint32) error {
 	var res RPCResponse
 
 	n, err := s.store.GetAvailableDiskBytes()
-	log.Printf("error: failed getting available disk space: %w", err)
 	if err != nil {
 		res = RPCResponse{
 			Sum: &GetDiskSpaceResponse{
@@ -452,7 +478,7 @@ func (s *Server) handleGetDiskSpaceRequest(req *GetDiskSpaceRequest, from net.Ad
 	res = RPCResponse{
 		Sum: &GetDiskSpaceResponse{
 			Result: n,
-			Err:    nil,
+			Err:    NilErr,
 		},
 	}
 
@@ -473,7 +499,7 @@ func (s *Server) prepareAndSendRequest(req RPCRequest, addr net.Addr, chId uint3
 
 	channel, ok := peer.GetChannel(chId)
 	if !ok {
-		return fmt.Errorf("failed getting channel (%s)", chId)
+		return fmt.Errorf("failed getting channel (%d)", chId)
 	}
 
 	if err := channel.SendRequest(buf.Bytes()); err != nil {
@@ -483,308 +509,252 @@ func (s *Server) prepareAndSendRequest(req RPCRequest, addr net.Addr, chId uint3
 	return nil
 }
 
-// Stream data to peers that don't already have the file.
-// func (s *Server) BroadcastData(r io.ReadCloser) error {
-// 	peers := []io.Writer{}
-// 	for _, peer := range s.peers.Values() {
-// 		peers = append(peers, peer)
-// 	}
+func (s *Server) MakeHasFileRequest(fileHash string, peer p2p.Peer, chId uint32) (*HasFileResponse, error) {
 
-// 	// We shouldn't really use a multiwriter because if we fail
-// 	// to write to one peer then the stream will end to all peers.
-// 	mw := io.MultiWriter(peers...)
-
-// 	_, err := io.Copy(mw, bytes.NewReader([]byte{p2p.StartStream}))
-// 	if err != nil {
-// 		return fmt.Errorf("failed to copy data to peers: %w", err)
-// 	}
-
-// 	_, err = io.Copy(mw, r)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to copy data to peers: %w", err)
-// 	}
-
-// 	if err = r.Close(); err != nil {
-// 		return fmt.Errorf("failed closing read closer: %w", err)
-// 	}
-
-// 	return nil
-// }
-
-func (s *Server) BroadcastMessage(data []byte) {
-	for _, peer := range s.peers.Values() {
-		log.Printf("[%s]: Broadcasting message to peer (%s)", s.Transport.LAddr(), peer.RemoteAddr())
-		if err := peer.SendMessage(data); err != nil {
-			log.Printf("Failed sending payload to peer (%s): %s", peer.RemoteAddr(), err)
-		}
+	channel, ok := peer.GetChannel(chId)
+	if !ok {
+		return &HasFileResponse{}, fmt.Errorf("failed to get channel for peer (%s)", peer.RemoteAddr())
 	}
+
+	req := RPCRequest{
+		Sum: &HasFileRequest{
+			FileHash: fileHash,
+		},
+	}
+
+	if err := s.prepareAndSendRequest(req, peer.RemoteAddr(), chId); err != nil {
+		// log.Printf("error: failed to send request: %w", err)
+		return &HasFileResponse{}, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	msg, err := channel.RecvResponse()
+	if err != nil {
+		// log.Printf("error: failed to receive response from (%s):", peer.RemoteAddr())
+		return &HasFileResponse{}, fmt.Errorf("failed to receive response from (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	// Decode
+	r := bytes.NewReader(msg.Payload)
+	res := RPCResponse{}
+	if err := gob.NewDecoder(r).Decode(&res); err != nil {
+		// log.Printf("err: failed decoding hasFile response: %w", err)
+		return &HasFileResponse{}, fmt.Errorf("err: failed decoding hasFile response: %w", err)
+	}
+
+	hasFileRes, ok := res.Sum.(*HasFileResponse)
+	if !ok {
+		// log.Printf("error: unexpected response type, wanted (*HasFileResponse)")
+		return &HasFileResponse{}, fmt.Errorf("error: unexpected response type, wanted (*HasFileResponse)")
+	}
+
+	if hasFileRes.Err.NotNil() {
+		// log.Printf("Remte peer (%s) error: %s", peer.RemoteAddr(), err)
+		return &HasFileResponse{}, fmt.Errorf("remote peer (%s) error: %s", peer.RemoteAddr(), hasFileRes.Err)
+	}
+
+	return hasFileRes, nil
 }
 
-func (s *Server) handleMessage(msg *p2p.Message) error {
-	// The issue with handling messages in this way is that a lot of the
-	// operations and exchanges between peers that we want to carry out
-	// require multiple messages to be sent between peers that need to be
-	// processed in a particular order. This function only really works for
-	// one off messages because there is no way to prevent race conditions
-	// using this central handler.
-	//
-	// If we need messages to be processed sequentially in a particular
-	// order then we need a more robust set of handling logic to ensure
-	// that we prevent race conditions.
-	//
-	// One way we could do this is by multiplexing our connection into
-	// multiple channels such that each operation will only receive
-	// messages that it would expect to recieve as part of that operation.
-	// This would probably be the most performat method but would be
-	// complex to implement.
-	//
-	// Alternatively we could simply queue all the messages we receive
-	// for each peer and then loop through them, re-queueing the ones that
-	// we wouldn't expect to handle as part of the current operation. This
-	// would be less performant and would require timeouts on each operation
-	//
+func (s *Server) MakePutFileRequest(fileHash string, fileSize int, peer p2p.Peer, chId uint32) (*PutFileResponse, error) {
+
+	channel, ok := peer.GetChannel(chId)
+	if !ok {
+		return &PutFileResponse{}, fmt.Errorf("failed to get channel for peer (%s)", peer.RemoteAddr())
+	}
+
+	req := RPCRequest{
+		Sum: &PutFileRequest{
+			FileHash: fileHash,
+			FileSize: fileSize,
+		},
+	}
+
+	if err := s.prepareAndSendRequest(req, peer.RemoteAddr(), chId); err != nil {
+		// log.Printf("error: failed sending request to (%s): %s", peer.RemoteAddr(), err)
+		return &PutFileResponse{}, fmt.Errorf("failed sending request to (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	msg, err := channel.RecvResponse()
+	if err != nil {
+		// log.Printf("error: failed to recieve repsonse from (%s): %s", peer.RemoteAddr(), err)
+		return &PutFileResponse{}, fmt.Errorf("failed to recieve repsonse from (%s): %w", peer.RemoteAddr(), err)
+	}
 
 	r := bytes.NewReader(msg.Payload)
-	payload := Payload{}
-	if err := gob.NewDecoder(r).Decode(&payload); err != nil {
-		return fmt.Errorf("failed to decode payload: %w", err)
+	res := RPCResponse{}
+	if err := gob.NewDecoder(r).Decode(&res); err != nil {
+		// log.Printf("err: failed decoding putFile response: %w", err)
+		return &PutFileResponse{}, fmt.Errorf("failed decoding putFile response: %w", err)
 	}
 
-	log.Printf("Handling message. Payload Type: %s", payload.Type)
-
-	// log.Printf("Payload Data: %v", payload.Data)
-	// log.Printf("Payload Data Type: %v", reflect.TypeOf(payload.Data))
-
-	switch payload.Type {
-	case PayloadType_Notify_NewFile:
-		peer, ok := s.peers.Get(msg.From)
-		if !ok {
-			return fmt.Errorf("peer (%s) not found", msg.From)
-		}
-
-		// Get file hash and metadata
-		data := payload.Data
-
-		fileHash := data.FileHash
-
-		// Check if we have file.
-		if s.HasFile(fileHash) {
-			log.Printf("(%s): File already present on disk.", s.Transport.LAddr())
-			return nil
-		}
-
-		// If we are already writing the file, return
-		if s.pendingFiles.Has(fileHash) {
-			log.Printf("(%s): File already pending.", s.Transport.LAddr())
-			return nil
-		}
-
-		s.pendingFiles.Add(fileHash)
-		defer s.pendingFiles.Remove(fileHash)
-
-		// Request the file from the peer that notified us
-		stream, err := peer.StartStream()
-		if err != nil {
-			return fmt.Errorf("error opening stream to peer (%s): %w", peer.RemoteAddr(), err)
-		}
-
-		defer stream.Close()
-
-		buf := new(bytes.Buffer)
-		payload := Payload{
-			Type: PayloadType_Request_GetFile,
-			Data: PayloadData{
-				FileHash: fileHash,
-				StreamId: stream.Id(),
-			},
-		}
-
-		if err := gob.NewEncoder(buf).Encode(payload); err != nil {
-			return fmt.Errorf("failed to encode request payload: %w", err)
-		}
-
-		peer.SendMessage(buf.Bytes())
-
-		hash, err := s.StoreFile(stream)
-		if err != nil {
-			// We might need to clean up tmp/ here as well.
-			return fmt.Errorf("failed to store file: %w", err)
-		}
-
-		log.Printf("(%s): Retrieved and stored file (%s).", s.Transport.LAddr(), hash)
-
-		if hash != fileHash {
-			panic(fmt.Sprintf("wrong file hash after write, got %s, expected %s", hash, fileHash))
-			// return fmt.Errorf("wrong file hash after write, got %s, expected %s", hash, fileHash)
-		}
-
-	case PayloadType_Request_GetFile:
-		peer, ok := s.peers.Get(msg.From)
-		if !ok {
-			return fmt.Errorf("peer (%s) not found", msg.From)
-		}
-
-		stream, ok := peer.GetStream(payload.Data.StreamId)
-		if !ok {
-			return fmt.Errorf("could not find stream with id (%d)", payload.Data.StreamId)
-		}
-
-		defer stream.Close()
-
-		// A file has been requested by a peer. For now a peer will only request
-		// a file if we have notified them that we have it so we don't need to
-		// check for the file before streaming it to them (unless it has been
-		// deleted since we notified them...)
-		data := payload.Data
-
-		// Check for file
-		fileHash := data.FileHash
-
-		if !s.HasFile(fileHash) {
-			return fmt.Errorf("file (%s) not found", fileHash)
-		}
-
-		f, err := s.store.Read(fileHash)
-		if err != nil {
-			return fmt.Errorf("failed to read file: %w", err)
-		}
-
-		// fileSize, err := s.store.GetFileSize(fileHash)
-		// if err != nil {
-		// 	return fmt.Errorf("failed to get file size: %s", err)
-		// }
-
-		_, err = io.Copy(stream, f)
-		if err != nil {
-			// TODO:  If we fail streaming to peer, drop them.
-			return fmt.Errorf("failed streaming file to peer (%s): %w", msg.From, err)
-		}
-
-		err = f.Close()
-		if err != nil {
-			return fmt.Errorf("failed to close reader: %w", err)
-		}
-
-	case PayloadType_Notify_HasFile:
-		// Check if file has been requested
-		fileHash := payload.Data.FileHash
-		if !s.requestedFiles.Has(fileHash) || s.pendingFiles.Has(fileHash) {
-			return nil
-		}
-
-		s.pendingFiles.Add(fileHash)
-		defer s.pendingFiles.Remove(fileHash)
-
-		peer, ok := s.peers.Get(msg.From)
-		if !ok {
-			return ErrPeerNotFound
-		}
-
-		// Open stream
-		stream, err := peer.StartStream()
-		if err != nil {
-			return fmt.Errorf("error opening stream to peer (%s): %w", peer.RemoteAddr(), err)
-		}
-
-		buf := new(bytes.Buffer)
-		payload := Payload{
-			Type: PayloadType_Request_GetFile,
-			Data: PayloadData{
-				FileHash: fileHash,
-				StreamId: stream.Id(),
-			},
-		}
-
-		if err := gob.NewEncoder(buf).Encode(payload); err != nil {
-			return fmt.Errorf("failed to encode request payload: %w", err)
-		}
-
-		if err := peer.SendMessage(buf.Bytes()); err != nil {
-			return fmt.Errorf("failed to send message to peer: %w", err)
-		}
-
-		fHash, err := s.store.Write(stream)
-		if err != nil {
-			return fmt.Errorf("failed writing data from stream to file: %w", err)
-		}
-
-		log.Printf("(%s): Retrieved and stored file (%s).", s.Transport.LAddr(), fHash)
-
-		if fHash != fileHash {
-			panic(fmt.Sprintf("wrong file hash after write, got %s, expected %s", fHash, fileHash))
-			// return fmt.Errorf("wrong file hash after write, got %s, expected %s", hash, fileHash)
-		}
-
-		successCh, ok := s.requestedFiles.Get(fileHash)
-		if !ok {
-			return fmt.Errorf("failed to find result chan for requested file (%s)", fileHash)
-		}
-
-		successCh <- true
-
-	case PayloadType_Query_HasFile:
-		// Check if we have file. If we do, then we send the file
-		// and the metadata.
-
-		fileHash := payload.Data.FileHash
-
-		if !s.HasFile(fileHash) {
-			// Should send peer notificaiton that we don't have
-			// the requested file. For now just return
-			return nil
-		}
-
-		peer, ok := s.peers.Get(msg.From)
-		if !ok {
-			return ErrPeerNotFound
-		}
-
-		buf := new(bytes.Buffer)
-		payload := Payload{
-			Type: PayloadType_Notify_HasFile,
-			Data: PayloadData{
-				FileHash: fileHash,
-			},
-		}
-
-		if err := gob.NewEncoder(buf).Encode(payload); err != nil {
-			return fmt.Errorf("failed to encode notify payload: %w", err)
-		}
-
-		peer.SendMessage(buf.Bytes())
-
+	putFileRes, ok := res.Sum.(*PutFileResponse)
+	if !ok {
+		// log.Printf("error: unexpected response type, wanted (*HasFileResponse)")
+		return &PutFileResponse{}, fmt.Errorf("unexpected response type, wanted (*PutFileResponse)")
 	}
+
+	if putFileRes.Err.NotNil() {
+		// log.Printf("Remote peer (%s) error: %s", peer.RemoteAddr(), err)
+		return &PutFileResponse{}, fmt.Errorf("Remote peer (%s) error: %w", peer.RemoteAddr(), putFileRes.Err)
+	}
+
+	return putFileRes, nil
+}
+
+func (s *Server) MakeGetFileRequest(fileHash string, peer p2p.Peer, chId uint32) (*GetFileResponse, error) {
+
+	channel, ok := peer.GetChannel(chId)
+	if !ok {
+		return &GetFileResponse{}, fmt.Errorf("failed to get channel for peer (%s)", peer.RemoteAddr())
+	}
+
+	req := RPCRequest{
+		Sum: &GetFileRequest{
+			FileHash: fileHash,
+		},
+	}
+
+	if err := s.prepareAndSendRequest(req, peer.RemoteAddr(), chId); err != nil {
+		return &GetFileResponse{}, fmt.Errorf("failed sending request to peer (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	msg, err := channel.RecvResponse()
+	if err != nil {
+		return &GetFileResponse{}, fmt.Errorf("failed recieving response from (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	r := bytes.NewReader(msg.Payload)
+	res := RPCResponse{}
+	if err := gob.NewDecoder(r).Decode(&res); err != nil {
+		return &GetFileResponse{}, fmt.Errorf("failed decoding getFile response from (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	getFileRes, ok := res.Sum.(*GetFileResponse)
+	if !ok {
+		return &GetFileResponse{}, fmt.Errorf("unexpected response type, wanted (*GetFileResponse)")
+	}
+
+	if getFileRes.Err.NotNil() {
+		return &GetFileResponse{}, fmt.Errorf("remote peer (%s) error: %w", peer.RemoteAddr(), getFileRes.Err)
+	}
+
+	return getFileRes, nil
+}
+
+func (s *Server) MakeDeleteFileRequest(fileHash string, peer p2p.Peer, chId uint32) (*DeleteFileResponse, error) {
+
+	channel, ok := peer.GetChannel(chId)
+	if !ok {
+		return &DeleteFileResponse{}, fmt.Errorf("failed to get channel for peer (%s)", peer.RemoteAddr())
+	}
+
+	req := RPCRequest{
+		Sum: &DeleteFileRequest{
+			FileHash: fileHash,
+		},
+	}
+
+	if err := s.prepareAndSendRequest(req, peer.RemoteAddr(), chId); err != nil {
+		return &DeleteFileResponse{}, fmt.Errorf("failed sending request to peer (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	msg, err := channel.RecvResponse()
+	if err != nil {
+		return &DeleteFileResponse{}, fmt.Errorf("failed recieving response from (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	r := bytes.NewReader(msg.Payload)
+	res := RPCResponse{}
+	if err := gob.NewDecoder(r).Decode(&res); err != nil {
+		return &DeleteFileResponse{}, fmt.Errorf("failed decoding deleteFile response from (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	deleteFileRes, ok := res.Sum.(*DeleteFileResponse)
+	if !ok {
+		return &DeleteFileResponse{}, fmt.Errorf("unexpected response type, wanted (*DeleteFileResponse)")
+	}
+
+	if deleteFileRes.Err.NotNil() {
+		return &DeleteFileResponse{}, fmt.Errorf("remote peer (%s) error: %w", peer.RemoteAddr(), deleteFileRes.Err)
+	}
+
+	return deleteFileRes, nil
+}
+
+// This one is a little different since when purging a file we need to make the
+// request to all peers.
+func (s *Server) NetworkPurgeFile(fileHash string) error {
+	buf := new(bytes.Buffer)
+	req := RPCRequest{
+		Sum: &PurgeFileRequest{
+			FileHash: fileHash,
+		},
+	}
+
+	if err := gob.NewEncoder(buf).Encode(req); err != nil {
+		return fmt.Errorf("failed encoding purgeFile request: %w", err)
+	}
+
+	// Make request to all peers and keep track of number of failures
+	var numFailures = atomic.Uint32{}
+	var wg = &sync.WaitGroup{}
+	for _, peer := range s.peers.Values() {
+		wg.Add(1)
+		go func(peer p2p.Peer, wg *sync.WaitGroup) {
+			defer wg.Done()
+			channel, err := peer.OpenChannel()
+			if err != nil {
+				log.Printf("failed to open channel with peer (%s): %s", peer.RemoteAddr(), err)
+				return
+			}
+
+			defer channel.Close()
+
+			if err := channel.SendRequest(buf.Bytes()); err != nil {
+				log.Printf("failed sending purgeFile request to peer (%s)", peer.RemoteAddr())
+				return
+			}
+
+			msg, err := channel.RecvResponse()
+			if err != nil {
+				log.Printf("failed receiving message from peer (%s): %s", peer.RemoteAddr(), err)
+				return
+			}
+
+			r := bytes.NewReader(msg.Payload)
+			res := RPCResponse{}
+			if err := gob.NewDecoder(r).Decode(&res); err != nil {
+				log.Printf("failed decoding deleteFile response from peer (%s): %s", peer.RemoteAddr(), err)
+				return
+			}
+
+			purgeFileRes, ok := res.Sum.(*PurgeFileResponse)
+			if !ok {
+				log.Printf("unexpected response type, wanted (*PurgeFileResponse)")
+				return
+			}
+
+			if purgeFileRes.Err.NotNil() || !purgeFileRes.Result {
+				// Failed purge
+				numFailures.Add(1)
+			}
+
+		}(peer, wg)
+	}
+
+	wg.Wait()
+
+	if numFailures.Load() > 0 {
+		return fmt.Errorf("one or more nodes failed to acknowledge purge of file (%s): %w", fileHash, ErrPurgeFailed)
+	}
+
+	log.Printf("File (%s) successfully purged from the network. ", fileHash)
 
 	return nil
 }
 
 func (s *Server) HasFile(fileHash string) bool {
 	return s.store.fileExists(fileHash)
-}
-
-func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
-	if s.HasFile(fileHash) {
-		return s.store.Read(fileHash)
-	}
-
-	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
-
-	// Workflow for this:
-	//	- Add file hash to requested files
-	// 	- Query all peers for file.
-	//	- Request file from first peer to respond.
-
-	successCh := make(chan bool)
-	s.requestedFiles.Set(fileHash, successCh)
-
-	s.QueryNetworkHasFile(fileHash)
-
-	// We need to recieve a result here so we know when we can read the file.
-	if <-successCh {
-		return s.store.Read(fileHash)
-	}
-
-	return nil, errors.New("failed to recieve file from network")
 }
 
 // Stores a file and returns the file hash. Gossips the
@@ -802,61 +772,152 @@ func (s *Server) StoreFile(r io.Reader) (string, error) {
 		return fileHash, fmt.Errorf("failed to get size of file: %w", err)
 	}
 
+	log.Printf("Successfully stored file (%s) to disk, replicating to peers...", fileHash)
+
 	for _, peer := range s.peers.Values() {
-		go func(fileHash string) {
+		// We don't strictly need to put fileHash and fileSize in func args, but
+		// since we are spawning goroutines in a loop, it is good practice.
+		go func(peer p2p.Peer, fileHash string, fileSize int) {
 			channel, err := peer.OpenChannel()
 			if err != nil {
-				log.Printf("failed to open channel with peer (%s): ", peer.RemoteAddr(), err)
+				log.Printf("failed to open channel with peer (%s): %s", peer.RemoteAddr(), err)
 				return
 			}
 
-			req := RPCRequest{
-				Sum: &HasFileRequest{
-					FileHash: fileHash,
-				},
-			}
+			defer channel.Close()
 
-			if err := s.prepareAndSendRequest(req, peer.RemoteAddr(), channel.Id()); err != nil {
-				log.Printf("error: failed to send request: %w", err)
+			hasFileRes, err := s.MakeHasFileRequest(fileHash, peer, channel.Id())
+			if err != nil {
+				log.Printf("error: hasFile request failed: %s", err)
 				return
 			}
 
-			channel.RecvResponse()
+			if hasFileRes.Result {
+				// Peer already has file...
+				return
+			}
 
-		}(fileHash)
+			putFileRes, err := s.MakePutFileRequest(fileHash, fileSize, peer, channel.Id())
+			if err != nil {
+				log.Printf("error: failed making putFile request: %s", err)
+				return
+			}
+
+			if !putFileRes.Result {
+				// Peer rejected put request...
+				return
+			}
+
+			// Peer accepted request, start stream
+			f, err := s.store.Read(fileHash)
+			if err != nil {
+				log.Printf("error: failed reading file (%s): %s", fileHash, err)
+				return
+			}
+
+			defer f.Close()
+
+			_, err = io.Copy(channel, f)
+			if err != nil {
+				log.Printf("error: failed streaming file (%s): %s", fileHash, err)
+				return
+			}
+
+			log.Printf("[%s]: Successfully streamed file (%s) to peer (%s)", s.Transport.LAddr(), fileHash, peer.RemoteAddr())
+
+		}(peer, fileHash, int(fileSize))
 	}
-
-	buf := new(bytes.Buffer)
-	payload := Payload{
-		Type: PayloadType_Notify_NewFile,
-		Data: PayloadData{
-			FileHash: fileHash,
-			Metadata: Metadata{
-				FileSize: fileSize,
-			},
-		},
-	}
-
-	err = gob.NewEncoder(buf).Encode(payload)
-	if err != nil {
-		return fileHash, fmt.Errorf("failed to encode file hash to payload data: %w", err)
-	}
-
-	s.BroadcastMessage(buf.Bytes())
-
-	// f, err := s.store.Read(fileHash)
-	// if err != nil {
-	// 	return fileHash, fmt.Errorf("failed to read file: %w", err)
-	// }
-
-	// err = s.BroadcastData(f)
-	// if err != nil {
-	// 	return fileHash, fmt.Errorf("error broadcasting data: %w", err)
-	// }
-
-	// f.Close()
 
 	return fileHash, nil
+}
+
+func (s *Server) GetFile(fileHash string) (io.ReadCloser, error) {
+	if s.HasFile(fileHash) {
+		return s.store.Read(fileHash)
+	}
+
+	log.Printf("(%s): File (%s) not found on disk, requesting file from peers...", s.Transport.LAddr(), fileHash)
+
+	// Workflow for this:
+	//	- Query all peers for file.
+	//  - Mark file as incoming when we find a peer with the file.
+	// 	- Issue getFile request to the peer.
+
+	var success bool
+	for _, peer := range s.peers.Values() {
+		// go func(peer p2p.Peer, fileHash string) {
+		// }(peer, fileHash)
+
+		// Panics if the fileHash is different after fetching.
+		if err := s.GetFileFromPeer(fileHash, peer); err != nil {
+			log.Printf("failed to get file (%s) from peer (%s): %s", fileHash, peer.RemoteAddr(), err)
+			continue
+		}
+
+		success = true
+		break
+	}
+
+	if success {
+		return s.store.Read(fileHash)
+	}
+
+	return nil, errors.New("failed to recieve file from network")
+}
+
+// Panics if file is different after writing to disk.
+func (s *Server) GetFileFromPeer(fileHash string, peer p2p.Peer) error {
+
+	channel, err := peer.OpenChannel()
+	if err != nil {
+		return fmt.Errorf("failed to open channel with peer (%s): %w", peer.RemoteAddr(), err)
+	}
+
+	defer channel.Close()
+
+	hasFileRes, err := s.MakeHasFileRequest(fileHash, peer, channel.Id())
+	if err != nil {
+		return fmt.Errorf("failed making hasFile request: %w", err)
+
+	}
+
+	if !hasFileRes.Result {
+		// Peer does not have file...
+		return fmt.Errorf("peer (%s) does not have file: %s", peer.RemoteAddr(), fileHash)
+	}
+
+	// Request file from peer
+
+	getFileRes, err := s.MakeGetFileRequest(fileHash, peer, channel.Id())
+	if err != nil {
+		return fmt.Errorf("failed making getFile request: %s", err)
+	}
+
+	// If we get here, request was successful, start reading from stream.
+	fileSize := getFileRes.Result
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		defer pw.Close()
+		_, err := io.CopyN(pw, channel, int64(fileSize))
+		if err != nil {
+			log.Printf("error: failed copying from channel: %s", err)
+		}
+	}()
+
+	writtenHash, err := s.store.Write(pr)
+	if err != nil {
+		return fmt.Errorf("error: failed writing file: %s", err)
+	}
+
+	if writtenHash != fileHash {
+		panic(fmt.Sprintf("wrong file hash after storage, expected (%s), got (%s)", fileHash, writtenHash))
+	}
+
+	log.Printf("Recieved file (%s) from peer (%s).", writtenHash, peer.RemoteAddr())
+
+	return nil
 }
 
 // Deletes file locally.
@@ -866,61 +927,36 @@ func (s *Server) DeleteFile(fileHash string) error {
 	}
 
 	if err := s.store.Delete(fileHash); err != nil {
-		return fmt.Errorf("error deleting file: %w", err)
+		return fmt.Errorf("error deleting file (%s): %w", fileHash, err)
 	}
 
 	return nil
 }
 
 // Deletes file locally and signals to peers that they
-// can delete the file as well.
+// should delete the file as well.
 func (s *Server) PurgeFile(fileHash string) error {
 
+	// Delete locally
 	if err := s.DeleteFile(fileHash); err != nil {
 		return fmt.Errorf("failed to delete file (%s): %w", fileHash, err)
 	}
 
-	// Notify peers to delete file
-	buf := new(bytes.Buffer)
-	payload := Payload{
-		Type: PayloadType_Request_DeleteFile,
-		Data: PayloadData{
-			FileHash: fileHash,
-		},
+	// Send purge request to peers. I'm thinking that this should be
+	// a blocking synchronous operation so that the caller can be
+	// notified of success/failure after the message has propagated
+	// through all peers.
+
+	if err := s.NetworkPurgeFile(fileHash); err != nil {
+		return fmt.Errorf("failed purging file (%s): %s", fileHash, err)
 	}
-	if err := gob.NewEncoder(buf).Encode(payload); err != nil {
-		return fmt.Errorf("failed to encode deleteFile payload: %w", err)
-	}
-
-	s.BroadcastMessage(buf.Bytes())
-
-	// We could mark the file as purge pending and we could
-	// periodically check to see if the purge is complete. This
-	// would need to be done asynchronously.
-
-	return nil
-}
-
-func (s *Server) QueryNetworkHasFile(fileHash string) error {
-	buf := new(bytes.Buffer)
-	payload := Payload{
-		Type: PayloadType_Query_HasFile,
-		Data: PayloadData{
-			FileHash: fileHash,
-		},
-	}
-
-	if err := gob.NewEncoder(buf).Encode(payload); err != nil {
-		return fmt.Errorf("failed to encode payload: %w", err)
-	}
-
-	s.BroadcastMessage(buf.Bytes())
 
 	return nil
 }
 
 func (s *Server) OnPeer(peer p2p.Peer) error {
 	s.addPeer(peer)
+	peer.RegisterRequestHandler(s.handleRequest)
 	return nil
 }
 
@@ -943,6 +979,24 @@ func newSet[T comparable]() *set[T] {
 type set[T comparable] struct {
 	m  map[T]struct{}
 	mu sync.RWMutex
+}
+
+// Adds the value to the set if it is not already present.
+//
+// Returns a boolean indicating whether the value was added
+// or not. Eg: Returns true when the value was not present and
+// has been added. Returns false when the value is already
+// present and has not been added.
+func (s *set[T]) AddIfNotHas(t T) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.m[t]; !ok {
+		s.m[t] = struct{}{}
+		return true
+	}
+
+	return false
 }
 
 func (s *set[T]) Add(t T) {
@@ -1006,33 +1060,33 @@ func (p *peerMap) Values() []p2p.Peer {
 	return values
 }
 
-type syncMap[K comparable, V any] struct {
-	m  map[K]V
-	mu sync.RWMutex
-}
+// type syncMap[K comparable, V any] struct {
+// 	m  map[K]V
+// 	mu sync.RWMutex
+// }
 
-func (s *syncMap[K, V]) Set(k K, v V) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[k] = v
-}
+// func (s *syncMap[K, V]) Set(k K, v V) {
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+// 	s.m[k] = v
+// }
 
-func (s *syncMap[K, V]) Get(k K) (V, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.m[k]
-	return v, ok
-}
+// func (s *syncMap[K, V]) Get(k K) (V, bool) {
+// 	s.mu.RLock()
+// 	defer s.mu.RUnlock()
+// 	v, ok := s.m[k]
+// 	return v, ok
+// }
 
-func (s *syncMap[K, V]) Delete(k K) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, k)
-}
+// func (s *syncMap[K, V]) Delete(k K) {
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+// 	delete(s.m, k)
+// }
 
-func (s *syncMap[K, V]) Has(k K) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.m[k]
-	return ok
-}
+// func (s *syncMap[K, V]) Has(k K) bool {
+// 	s.mu.RLock()
+// 	defer s.mu.RUnlock()
+// 	_, ok := s.m[k]
+// 	return ok
+// }

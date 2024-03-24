@@ -9,10 +9,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
-)
-
-var (
-	ErrWouldBlock = errors.New("operation would block")
+	"time"
 )
 
 // To create a multiplexed stream we will need each packet sent
@@ -26,26 +23,12 @@ var (
 const (
 	packetType_Unspecified byte = iota
 
-	//// I think we only need to do this if we need to send
-	//// really big messages, like for example chunks of
-	//// storage metadata. However, we can just utilize
-	//// the streams and our own messages external to this
-	//// package to handle those cases.
-	// packetType_StartMessage
-	// packetType_MessageData
-	// packetType_EndMessage
-	packetType_Message
-
 	packetType_RequestMessage
 	packetType_ResponseMessage
 
 	packetType_OpenChannel
 	packetType_StreamData
 	packetType_CloseChannel
-
-	// packetType_StartStream
-	// packetType_StreamData
-	// packetType_EndStream
 )
 
 const rawHeaderSize = 7
@@ -116,7 +99,9 @@ type Channel struct {
 	responseCh  chan *Message
 
 	// Notifies the Channel when there is something to read
-	notifyReadCh chan struct{}
+	notifyReadCh     chan struct{}
+	notifyRequestCh  chan struct{}
+	notifyResponseCh chan struct{}
 
 	finishOnce       sync.Once
 	notifyFinishedCh chan struct{}
@@ -127,10 +112,6 @@ type Channel struct {
 
 func (c *Channel) Id() uint32 {
 	return c.id
-}
-
-func (c *Channel) ConsumeRequests() chan *Message {
-	return c.requestCh
 }
 
 // Read implements the net.Conn interface
@@ -168,7 +149,7 @@ func (c *Channel) Read(b []byte) (int, error) {
 			// log.Printf("Notifying of read...")
 			continue
 		case <-c.notifyFinishedCh:
-			// log.Printf("stream (%d) finished...", c.id)
+			log.Printf("stream (%d) finished...", c.id)
 			c.bMu.Lock()
 			if len(c.readBuffer) > 0 {
 				c.bMu.Unlock()
@@ -230,17 +211,6 @@ func (c *Channel) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-func (c *Channel) RecvResponse() []byte {
-
-	for {
-		select {
-		case <-c.closedCh:
-		}
-	}
-
-	return nil
-}
-
 func (c *Channel) SendRequest(req []byte) error {
 	if len(req) > int(c.mconn.packetPayloadSize) {
 		return errors.New("message exceeds max packet payload size")
@@ -286,31 +256,6 @@ func (c *Channel) SendResponse(res []byte) error {
 	return nil
 }
 
-// Wraps a message into a packet for sending. The size of
-// the message must not exceed m.packetPayloadSize
-func (c *Channel) SendMessage(data []byte) error {
-
-	if len(data) > int(c.mconn.packetPayloadSize) {
-		return errors.New("message too big")
-	}
-
-	// Wrap in packet
-	p := &packet{
-		header: packetHeader{
-			packetType: packetType_Message,
-			channelId:  c.id,
-		},
-		payload: data,
-	}
-
-	_, err := c.mconn.writePacket(p)
-	if err != nil {
-		return fmt.Errorf("failed to write message packet: %w", err)
-	}
-
-	return nil
-}
-
 func (c *Channel) Close() error {
 	var firstCloseCall bool
 
@@ -319,6 +264,7 @@ func (c *Channel) Close() error {
 	select {
 	case <-c.notifyFinishedCh:
 		// Stream closed from other side, clean up
+		log.Printf("Finished signal received...")
 		c.mconn.mu.Lock()
 		delete(c.mconn.channels, c.id)
 		c.mconn.mu.Unlock()
@@ -358,14 +304,33 @@ func (c *Channel) responseLoop() {
 
 		// TODO: change this to lock only the buffer needed.
 		c.bMu.Lock()
-		data := make([]byte, len(c.responseBuf[0]))
 		if len(c.responseBuf) > 0 {
+			data := make([]byte, len(c.responseBuf[0]))
+			copy(data, c.responseBuf[0])
+			c.responseBuf[0] = nil
+			c.responseBuf = c.responseBuf[1:]
+			c.bMu.Unlock()
+
+			res := &Message{
+				From:      c.mconn.RemoteAddr(),
+				Payload:   data,
+				ChannelId: c.id,
+			}
+
+			c.responseCh <- res
+
+			continue
 
 		}
 		c.bMu.Unlock()
 
 		select {
-		case c.responseCh <- data:
+		case <-c.notifyResponseCh:
+			continue
+		case <-c.closedCh:
+			return
+		case <-c.mconn.connReadErrCh:
+			return
 		}
 
 	}
@@ -375,22 +340,33 @@ func (c *Channel) requestLoop() {
 	for {
 
 		c.bMu.Lock()
-		data := make([]byte, len(c.requestBuf[0]))
 		if len(c.requestBuf) > 0 {
+			data := make([]byte, len(c.requestBuf[0]))
 			copy(data, c.requestBuf[0])
 			c.requestBuf[0] = nil
 			c.requestBuf = c.requestBuf[1:]
+			c.bMu.Unlock()
+
+			msg := &Message{
+				From:      c.mconn.RemoteAddr(),
+				Payload:   data,
+				ChannelId: c.id,
+			}
+
+			// log.Printf("(%s): Received request from: %s", c.mconn.conn.LocalAddr(), msg.From)
+
+			if err := c.mconn.requestHandler(msg); err != nil {
+				log.Printf("(%s): Failed to process request: %s\n", c.mconn.conn.LocalAddr(), err)
+			}
+
+			// c.requestCh <- req
+
+			continue
 		}
 		c.bMu.Unlock()
 
-		req := &Message{
-			From:      c.mconn.RemoteAddr(),
-			Payload:   data,
-			ChannelId: c.id,
-		}
-
 		select {
-		case c.requestCh <- req:
+		case <-c.notifyRequestCh:
 			continue
 		case <-c.closedCh:
 			return
@@ -398,6 +374,20 @@ func (c *Channel) requestLoop() {
 			return
 		}
 
+	}
+}
+
+func (c *Channel) ConsumeRequests() chan *Message {
+	return c.requestCh
+}
+
+func (c *Channel) RecvResponse() (*Message, error) {
+	select {
+	case res := <-c.responseCh:
+		return res, nil
+	case <-time.NewTimer(time.Second * 5).C:
+		// Should we close the channel here?
+		return nil, fmt.Errorf("Waiting for response timed out.")
 	}
 }
 
@@ -410,6 +400,20 @@ func (c *Channel) newPayload(b []byte) {
 func (c *Channel) notifyRead() {
 	select {
 	case c.notifyReadCh <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Channel) notifyRequest() {
+	select {
+	case c.notifyRequestCh <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Channel) notifyResponse() {
+	select {
+	case c.notifyResponseCh <- struct{}{}:
 	default:
 	}
 }
@@ -429,7 +433,7 @@ func (c *Channel) newResponseMessage(data []byte) {
 
 func (c *Channel) finished() {
 	c.finishOnce.Do(func() {
-		c.notifyFinishedCh <- struct{}{}
+		close(c.notifyFinishedCh)
 	})
 }
 
@@ -441,6 +445,8 @@ func (c *Channel) finished() {
 type MConn interface {
 	OpenChannel() (*Channel, error)
 	GetChannel(uint32) (*Channel, bool)
+
+	RegisterRequestHandler(func(*Message) error)
 
 	// StartStream() (*Channel, error)
 	// GetStream(uint32) (*Channel, bool)
@@ -467,7 +473,7 @@ type TCPMConn struct {
 
 	nextChannelId uint32
 
-	reqHandleFunc func([]byte)
+	requestHandler func(*Message) error
 
 	packetPayloadSize uint16
 
@@ -504,20 +510,23 @@ func NewTCPMConn(conn net.Conn, isOutbound bool) *TCPMConn {
 	return m
 }
 
-func (m *TCPMConn) SetReqHandleFunc(f func([]byte)) {
-	m.reqHandleFunc = f
-}
-
 func (m *TCPMConn) newChannel(sid uint32) *Channel {
 	s := new(Channel)
 	s.id = sid
 	s.mconn = m
 	s.requestCh = make(chan *Message)
+	s.responseCh = make(chan *Message)
 	s.notifyReadCh = make(chan struct{})
+	s.notifyRequestCh = make(chan struct{})
+	s.notifyResponseCh = make(chan struct{})
 	s.notifyFinishedCh = make(chan struct{})
 	s.closedCh = make(chan struct{})
 
 	return s
+}
+
+func (m *TCPMConn) RegisterRequestHandler(f func(*Message) error) {
+	m.requestHandler = f
 }
 
 func (m *TCPMConn) OpenChannel() (*Channel, error) {
@@ -532,9 +541,11 @@ func (m *TCPMConn) OpenChannel() (*Channel, error) {
 	// TODO: Handle overflow
 	m.mu.Unlock()
 
-	log.Printf("Opening channel with ID: %d", chId)
+	// log.Printf("Opening channel with ID: %d", chId)
 
 	channel := m.newChannel(chId)
+
+	go channel.responseLoop()
 
 	p := &packet{
 		header: packetHeader{
@@ -557,7 +568,6 @@ func (m *TCPMConn) OpenChannel() (*Channel, error) {
 }
 
 func (m *TCPMConn) GetChannel(id uint32) (*Channel, bool) {
-	log.Printf("Channels: %+v", m.channels)
 	stream, ok := m.channels[id]
 	return stream, ok
 }
@@ -653,25 +663,6 @@ func (m *TCPMConn) readLoop() {
 			channelId := hdr.channelId()
 
 			switch hdr.packetType() {
-			// We need to split the message case into two parts, one to
-			// handle requests and one to handle responses.
-			// case packetType_Message:
-			// 	buf := make([]byte, hdr.payloadSize())
-			// 	_, err := io.ReadFull(m.conn, buf)
-			// 	if err == nil || err == io.EOF {
-			// 		m.mu.Lock()
-			// 		channel, ok := m.channels[channelId]
-			// 		if ok {
-			// 			channel.newPayload(buf)
-			// 			channel.notifyRead()
-			// 		}
-			// 		m.mu.Unlock()
-			// 	} else {
-			// 		log.Printf("error reading packet payload: %s", err)
-			// 		m.onConnReadError(err)
-			// 		return
-			// 	}
-
 			case packetType_RequestMessage:
 				// RPC requests will get passed straight into the user provided
 				// message handler.
@@ -693,6 +684,7 @@ func (m *TCPMConn) readLoop() {
 				}
 
 			case packetType_ResponseMessage:
+
 				// RPC responses will get queued on the channel for the user to
 				// dequeue and process manually.
 				buf := make([]byte, hdr.payloadSize())
@@ -712,6 +704,7 @@ func (m *TCPMConn) readLoop() {
 				}
 
 			case packetType_OpenChannel:
+				// log.Printf("[%s]: opening new channel", m.conn.LocalAddr())
 				m.mu.Lock()
 				if _, ok := m.channels[channelId]; !ok {
 					channel := m.newChannel(channelId)
@@ -742,6 +735,7 @@ func (m *TCPMConn) readLoop() {
 				}
 
 			case packetType_CloseChannel:
+				// log.Printf("Closing channel (%d)", channelId)
 				m.mu.Lock()
 				if channel, ok := m.channels[channelId]; ok {
 					channel.notifyRead()

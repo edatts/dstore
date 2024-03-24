@@ -416,6 +416,7 @@ func (s *Store) ReadBuffered(fileHash string) (*BufferedReader, error) {
 	return br, nil
 }
 
+// TODO: Find a way to take into account files that are in transit.
 func (s *Store) GetAvailableDiskBytes() (int, error) {
 
 	var stat unix.Statfs_t
@@ -425,9 +426,9 @@ func (s *Store) GetAvailableDiskBytes() (int, error) {
 		return 0, fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	log.Printf("working dir: %s", wd+"/"+defaultStoragePath)
+	// log.Printf("working dir: %s", wd)
 
-	if err := unix.Statfs(wd, &stat); err != nil {
+	if err := unix.Statfs(wd+"/"+s.StorageRoot, &stat); err != nil {
 		return 0, fmt.Errorf("failed to stat file system: %w", err)
 	}
 

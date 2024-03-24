@@ -28,10 +28,10 @@ func (d DefaultDecoder) Decode(r io.Reader, msg *Message) error {
 		return err
 	}
 
-	if firstByte[0] == StartStream {
-		msg.IncomingStream = true
-		return nil
-	}
+	// if firstByte[0] == StartStream {
+	// 	msg.IncomingStream = true
+	// 	return nil
+	// }
 
 	buf := make([]byte, 2048)
 	n, err := r.Read(buf)
