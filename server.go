@@ -371,14 +371,7 @@ func (s *Server) handlePutFileRequest(req *PutFileRequest, from net.Addr, chId u
 			}
 		}()
 
-		// This version does not progagate the file to more peers.
-		// fileHash, err := s.store.Write(pr)
-		// if err != nil {
-		// 	log.Printf("error: failed writing to store: %w", err)
-		// }
-
-		// This verison progagates the file to more peers.
-		fileHash, err := s.StoreFile(pr)
+		fileHash, err := s.StoreFile(pr, req.Propagate)
 		if err != nil {
 			log.Printf("error: failed writing to store: %s", err)
 			return
@@ -406,7 +399,7 @@ func (s *Server) handleDeleteFileRequest(req *DeleteFileRequest, from net.Addr, 
 	}
 
 	if err := s.store.Delete(req.FileHash); err != nil {
-		log.Printf("failed deleting file: %w", err)
+		log.Printf("failed deleting file: %s", err)
 		res = RPCResponse{
 			Sum: &DeleteFileResponse{
 				Result: false,
@@ -555,7 +548,7 @@ func (s *Server) MakeHasFileRequest(fileHash string, peer p2p.Peer, chId uint32)
 	return hasFileRes, nil
 }
 
-func (s *Server) MakePutFileRequest(fileHash string, fileSize int, peer p2p.Peer, chId uint32) (*PutFileResponse, error) {
+func (s *Server) MakePutFileRequest(fileHash string, fileSize int, peer p2p.Peer, chId uint32, propagate bool) (*PutFileResponse, error) {
 
 	channel, ok := peer.GetChannel(chId)
 	if !ok {
@@ -564,8 +557,9 @@ func (s *Server) MakePutFileRequest(fileHash string, fileSize int, peer p2p.Peer
 
 	req := RPCRequest{
 		Sum: &PutFileRequest{
-			FileHash: fileHash,
-			FileSize: fileSize,
+			FileHash:  fileHash,
+			FileSize:  fileSize,
+			Propagate: propagate,
 		},
 	}
 
@@ -759,7 +753,7 @@ func (s *Server) HasFile(fileHash string) bool {
 
 // Stores a file and returns the file hash. Gossips the
 // file content to other nodes for replicated storage.
-func (s *Server) StoreFile(r io.Reader) (string, error) {
+func (s *Server) StoreFile(r io.Reader, propagate bool) (string, error) {
 
 	// Store file to disk.
 	fileHash, err := s.store.Write(r)
@@ -770,6 +764,11 @@ func (s *Server) StoreFile(r io.Reader) (string, error) {
 	fileSize, err := s.store.GetFileSize(fileHash)
 	if err != nil {
 		return fileHash, fmt.Errorf("failed to get size of file: %w", err)
+	}
+
+	if !propagate {
+		log.Printf("Successfully stored file (%s) to disk.", fileHash)
+		return fileHash, nil
 	}
 
 	log.Printf("Successfully stored file (%s) to disk, replicating to peers...", fileHash)
@@ -797,7 +796,7 @@ func (s *Server) StoreFile(r io.Reader) (string, error) {
 				return
 			}
 
-			putFileRes, err := s.MakePutFileRequest(fileHash, fileSize, peer, channel.Id())
+			putFileRes, err := s.MakePutFileRequest(fileHash, fileSize, peer, channel.Id(), propagate)
 			if err != nil {
 				log.Printf("error: failed making putFile request: %s", err)
 				return

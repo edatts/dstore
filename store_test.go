@@ -241,7 +241,9 @@ func TestStore(t *testing.T) {
 
 func TestGetAvailableDiskBytes(t *testing.T) {
 
-	opts := StoreOpts{}
+	opts := StoreOpts{
+		StorageRoot: "test-storage",
+	}
 	s := NewStore(opts)
 
 	n, err := s.GetAvailableDiskBytes()

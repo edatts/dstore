@@ -130,8 +130,9 @@ func (r *GetFileRequest) isRPCRequest()   {}
 func (r *GetFileResponse) isRPCResponse() {}
 
 type PutFileRequest struct {
-	FileHash string
-	FileSize int
+	FileHash  string
+	FileSize  int
+	Propagate bool
 }
 
 type PutFileResponse struct {

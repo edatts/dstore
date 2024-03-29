@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log"
+	"os"
+	"runtime"
 	"time"
-
-	// "time"
 
 	"github.com/edatts/dstore/p2p"
 )
@@ -40,7 +41,31 @@ func makeServer(lAddr string, bootstrapNodes []string) *Server {
 	return s
 }
 
+type SmallFiles struct {
+	Hashes  []string
+	Content []string
+}
+
 func main() {
+
+	// Let's make some small test files
+	// var smallFiles = SmallFiles{}
+	// for i := 0; i < 100; i++ {
+	// 	content := getRandomString(50)
+	// 	hashBytes := sha256.Sum256([]byte(content))
+	// 	hash := hex.EncodeToString(hashBytes[:])
+
+	// 	smallFiles.Hashes = append(smallFiles.Hashes, hash)
+	// 	smallFiles.Content = append(smallFiles.Content, content)
+	// }
+
+	// f, err := os.Create("test-files/small-files.json")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// json.NewEncoder(f).Encode(smallFiles)
+	// os.Exit(0)
 
 	// Let's make some big test files
 	// f, err := os.Create("test-files/500MiB")
@@ -83,7 +108,7 @@ func main() {
 	_ = fileHash
 
 	data := bytes.NewReader(fileBytes)
-	_, err := s1.StoreFile(data)
+	_, err := s1.StoreFile(data, true)
 	if err != nil {
 		log.Fatalf("failed storing file: %s", err)
 	}
@@ -158,5 +183,129 @@ func main() {
 	// We also want to test to make sure that nodes will still
 	// respond to requests while they are streaming large files.
 
+	// Store large file in s1.
+	f, err := os.Open("test-files/2GiB")
+	if err != nil {
+		log.Fatalf("failed to open 2GiB file: %s", err)
+	}
+
+	startTime := time.Now().UnixMilli()
+	hash, err := s1.store.Write(f)
+	if err != nil {
+		log.Fatalf("failed to write file to store: %s", err)
+	}
+
+	f.Close()
+
+	log.Printf("Saved 2GiB file with hash (%s)", hash)
+	log.Printf("Time consumed: %d ms", time.Now().UnixMilli()-startTime)
+
+	// Store some small files in b1 so we can run requests on them
+	f, err = os.Open("test-files/small-files.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	smallFiles := SmallFiles{}
+	json.NewDecoder(f).Decode(&smallFiles)
+
+	for i := 0; i < len(smallFiles.Hashes); i++ {
+		r := bytes.NewReader([]byte(smallFiles.Content[i]))
+		hash, err := b1.store.Write(r)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if hash != smallFiles.Hashes[i] {
+			log.Fatalf("different hash after storage, got (%s), expected (%s)", hash, smallFiles.Hashes[i])
+		}
+	}
+
+	// Now stream large file from s1 to b1 while making concurrent
+	// requests from s1 to b1 but also from b1 to s1.
+	fileSize, err := s1.store.GetFileSize(hash)
+	if err != nil {
+		log.Fatalf("failed getting file size: %s", err)
+	}
+
+	for _, peer := range s1.peers.Values() {
+		if peer.RemoteAddr().String() == "127.0.0.1:3010" {
+			channel, err := peer.OpenChannel()
+			if err != nil {
+				log.Fatalf("failed opening channel: %s", err)
+			}
+
+			res, err := s1.MakePutFileRequest(hash, int(fileSize), peer, channel.Id(), false)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			if res.Result {
+				startTime := time.Now().UnixMilli()
+
+				// Start large file stream
+				go func() {
+					log.Printf("Started streaming large file.")
+
+					f, err := s1.store.Read(hash)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					defer f.Close()
+
+					n, err := io.Copy(channel, f)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					log.Printf("Wrote %d MiB to peer in %d ms", n/1024/1024, time.Now().UnixMilli()-startTime)
+				}()
+
+				runtime.Gosched()
+
+				// Start requests
+				channels := getNChannels(5, peer) // s1 -> b1 channels
+				go func(peer p2p.Peer) {
+					time.Sleep(time.Second)
+					// Make a hasFile request on every file across all channels.
+					for i := 0; i < len(smallFiles.Hashes); i++ {
+						res, err := s1.MakeHasFileRequest(smallFiles.Hashes[i], peer, channels[i%len(channels)].Id())
+						if err != nil {
+							log.Fatal(err)
+						}
+
+						if !res.Result {
+							log.Fatal("Expected only true results for hasFile requests...")
+						}
+
+						// Make getFile request on every 5th file
+						if i%5 == 4 {
+							if err := s1.GetFileFromPeer(smallFiles.Hashes[i], peer); err != nil {
+								log.Fatal(err)
+							}
+
+							log.Printf("Time elapsed: %d ms", time.Now().UnixMilli()-startTime)
+						}
+					}
+
+				}(peer)
+
+			}
+		}
+	}
+
 	select {}
+}
+
+func getNChannels(n int, peer p2p.Peer) []*p2p.Channel {
+	channels := []*p2p.Channel{}
+	for i := 0; i < n; i++ {
+		channel, err := peer.OpenChannel()
+		if err != nil {
+			log.Fatal(err)
+		}
+		channels = append(channels, channel)
+	}
+	return channels
 }

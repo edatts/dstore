@@ -88,10 +88,13 @@ type Channel struct {
 	id    uint32
 	mconn *TCPMConn
 
-	// Buffer containing packet messages, needs lock
+	// TODO: Create new type so we can give each buffer
+	//       it's own mutex.
+	// Buffer containing stream packets
 	readBuffer [][]byte
 	bMu        sync.Mutex
 
+	// Buffer containing requests from peers
 	requestBuf [][]byte
 	requestCh  chan *Message
 
